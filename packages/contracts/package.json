@@ -2,6 +2,7 @@
   "name": "@myrix/contracts",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Myrix 平台契约：身份、策略、功能授权、知识库、审计的共享类型",
   "main": "./src/index.ts",

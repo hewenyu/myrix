@@ -24,6 +24,13 @@ Myrix 是"基于 DSH 的企业治理面"。**不要修改 `vendor/deepseek-harne
 4. 涉及身份、授权、审计的改动，必须同步更新 `docs/adr/` 或在 PR 中说明为何不更新。
 5. 类型检查与测试是准入条件：`pnpm typecheck && pnpm test`。
 
+## 许可
+
+- 本仓库采用 **Apache License 2.0**（见 `LICENSE`），新增文件默认遵循同一许可。
+- 分发衍生作品时必须保留 `LICENSE` 与 `NOTICE`，并对修改过的文件作出声明。
+- 上游 DSH 为 MIT（`vendor/deepseek-harness/LICENSE`），版权与许可声明必须原样保留，不得删除或改写。
+- Apache-2.0 不授予商标权：不要在文档或界面上使用上游/企业商标暗示官方背书。
+
 ## 常用命令
 
 ```bash

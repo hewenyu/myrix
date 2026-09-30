@@ -2,6 +2,7 @@
   "name": "@myrix/governance",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Myrix PDP：RBAC + ABAC 策略判定引擎（纯函数、可测试、可热更新）",
   "main": "./src/index.ts",

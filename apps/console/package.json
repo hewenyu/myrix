@@ -2,6 +2,7 @@
   "name": "@myrix/console",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Myrix 管理后台（静态页面，由控制面同源托管）",
   "scripts": {

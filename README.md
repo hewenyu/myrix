@@ -11,6 +11,7 @@
 | 子模块路径 | `vendor/deepseek-harness` |
 | 锁定提交 | `639ed015397290b3745d163aafe02ffee4aa3f84`（DSH `0.2.0-rc.2` 之后一次合并） |
 | 本仓库角色 | 治理控制面（PDP）+ DSH 侧执行插件（PEP）+ 管理后台 + 部署与运维脚本 |
+| 许可证 | **Apache-2.0**（可商用，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)；上游 DSH 为 MIT） |
 
 ---
 
@@ -199,4 +200,12 @@ pnpm test
 
 ## 九、许可与合规
 
-本仓库尚未选择开源许可证（待确认）。上游 DSH 为 MIT。企业部署前请确认 fork 与再分发策略。
+- **本仓库：Apache License 2.0**，见 [LICENSE](LICENSE)。可商用、可修改、可闭源分发衍生作品；
+  分发时需保留 `LICENSE` 与 [NOTICE](NOTICE)，并对修改过的文件作出"已修改"声明。
+- **上游 DSH：MIT**，见 [vendor/deepseek-harness/LICENSE](vendor/deepseek-harness/LICENSE)（`Copyright (c) 2026 DeepSeek`）。
+  以 submodule 形式引入且未修改源码；MIT 与 Apache-2.0 兼容，再分发时请一并保留其许可与版权声明。
+- **商标**：Apache-2.0 不授予商标权。`DeepSeek`、`DeepSeek Harness` 等名称与标识的权利归其所有者；
+  对外宣传不要暗示官方背书。
+- **企业分发建议**：对外交付产品时，把 `LICENSE`、`NOTICE` 与第三方依赖许可清单（`pnpm-lock.yaml` 对应的
+  LICENSE 集合）一并打包；若后续加入商业插件，注意与 Apache-2.0 的兼容性（Apache-2.0 允许闭源衍生作品，
+  但需保留声明）。

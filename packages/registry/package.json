@@ -2,6 +2,7 @@
   "name": "@myrix/registry",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Myrix 功能裁剪：插件目录、依赖闭合、按主体算授权、生成 DSH profile 补丁",
   "main": "./src/index.ts",

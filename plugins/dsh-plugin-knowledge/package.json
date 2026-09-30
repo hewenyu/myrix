@@ -2,6 +2,7 @@
   "name": "@myrix/dsh-plugin-knowledge",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "DSH 侧知识库接入：以主体身份调用 Myrix 知识库联邦网关，暴露 kb 检索工具",
   "main": "./src/plugin.ts",
