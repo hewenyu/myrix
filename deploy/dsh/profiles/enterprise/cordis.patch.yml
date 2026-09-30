@@ -1,0 +1,45 @@
+# Myrix 企业 profile 的 cordis.patch.yml 示例。
+# 真实文件由 `pnpm render:profile <principalId> --out $DSH_HOME/profiles/enterprise` 生成：
+#   - 被裁剪的功能 → 对应行 disabled: true
+#   - 平台插件 → insert 行（config 指向控制面）
+# 层序（后层胜出）：bundles → profile/cordis.patch.yml → $DSH_HOME/cordis.patch.yml → --patch
+
+# 1) 关掉未授权的高风险能力（示例：桌面自动化）
+- id: computer-use
+  disabled: true
+
+# 2) 挂载 Myrix 治理插件（PEP）与功能裁剪插件
+- insert:
+    - id: myrix-governance
+      name: "@myrix/dsh-plugin-governance"
+      config:
+        controlPlaneUrl: http://127.0.0.1:8787
+        token: !!js process.env.MYRIX_AGENT_TOKEN
+        principalId: !!js process.env.MYRIX_PRINCIPAL_ID
+        sessionId: !!js process.env.MYRIX_SESSION_ID
+        failClosed: true
+    - id: myrix-entitlement
+      name: "@myrix/dsh-plugin-entitlement"
+      config:
+        controlPlaneUrl: http://127.0.0.1:8787
+        token: !!js process.env.MYRIX_AGENT_TOKEN
+        principalId: !!js process.env.MYRIX_PRINCIPAL_ID
+        toolOwners: !!js JSON.parse(process.env.MYRIX_TOOL_OWNERS ?? '[]')
+
+# 3) 知识库：二选一（路线 A 平台工具 / 路线 B 标准 MCP），说明见 ADR-0003
+# - insert:
+#     - id: myrix-knowledge
+#       name: "@myrix/dsh-plugin-knowledge"
+#       config:
+#         controlPlaneUrl: http://127.0.0.1:8787
+#         token: !!js process.env.MYRIX_AGENT_TOKEN
+#         principalId: !!js process.env.MYRIX_PRINCIPAL_ID
+#         tenantId: !!js process.env.MYRIX_TENANT_ID
+
+# 4) 收紧沙箱默认值（DSH 原生配置只作为执行机制，授权来自控制面）
+- id: sandbox-policy
+  config:
+    mode: workspace-write
+- id: approval
+  config:
+    policy: ask

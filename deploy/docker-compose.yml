@@ -1,0 +1,46 @@
+# Myrix 本地/单机部署编排。
+# 说明：
+#   - control-plane 是治理控制面（身份、策略、授权、知识库目录、管理后台）；
+#   - DSH 运行时按主体/租户单独部署（每个 Harness home 一个 profile），
+#     不在本 compose 内，避免把"多用户共用单进程"当成默认形态（见 ADR-0002）；
+#   - 模型路由、配额与提示词级审计由企业既有 LLM 网关承担（见 ADR-0004）。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: myrix
+      POSTGRES_PASSWORD: myrix
+      POSTGRES_DB: myrix
+    ports:
+      - "5432:5432"
+    volumes:
+      - myrix-pgdata:/var/lib/postgresql/data
+      - ./postgres/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myrix -d myrix"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  control-plane:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control-plane
+    environment:
+      PORT: "8787"
+      HOST: 0.0.0.0
+      MYRIX_ADMIN_TOKEN: ${MYRIX_ADMIN_TOKEN:?请设置 MYRIX_ADMIN_TOKEN}
+      DATABASE_URL: postgres://myrix:myrix@postgres:5432/myrix
+    ports:
+      - "8787:8787"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # llm-gateway:
+  #   企业既有网关（模型路由 / 配额 / 模型白名单 / 提示词审计）。
+  #   契约见 GET /api/v1/gateway/contract。
+
+volumes:
+  myrix-pgdata:
