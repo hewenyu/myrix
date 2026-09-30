@@ -1,0 +1,15 @@
+{
+  "name": "@myrix/knowledge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Myrix 知识库联邦：目录聚合、身份透传、跨库检索与结果合成",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@myrix/contracts": "workspace:*"
+  }
+}
