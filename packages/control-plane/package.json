@@ -1,0 +1,24 @@
+{
+  "name": "@myrix/control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Myrix 控制面：身份、策略判定、功能授权、知识库目录、审计与管理后台 API",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "myrix-control-plane": "./src/bin.ts"
+  },
+  "scripts": {
+    "start": "tsx src/bin.ts"
+  },
+  "dependencies": {
+    "@myrix/contracts": "workspace:*",
+    "@myrix/governance": "workspace:*",
+    "@myrix/knowledge": "workspace:*",
+    "@myrix/registry": "workspace:*"
+  }
+}

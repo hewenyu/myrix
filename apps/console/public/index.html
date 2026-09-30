@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Myrix 管理后台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">M</span>
+        <div>
+          <h1>Myrix 管理后台</h1>
+          <p class="sub">企业私有化 Agent 平台 · 基于 DeepSeek Harness</p>
+        </div>
+      </div>
+      <div class="token">
+        <label for="token">数据面令牌</label>
+        <input id="token" type="password" value="dev-admin-token" autocomplete="off" />
+        <button id="refresh" type="button">刷新</button>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button data-tab="overview" class="active">概览</button>
+      <button data-tab="identity">身份与角色</button>
+      <button data-tab="simulate">权限模拟</button>
+      <button data-tab="entitlement">功能裁剪</button>
+      <button data-tab="knowledge">知识库</button>
+      <button data-tab="audit">审计</button>
+      <button data-tab="gateway">模型与审计边界</button>
+    </nav>
+
+    <main id="view" class="view">
+      <p class="muted">加载中…</p>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
