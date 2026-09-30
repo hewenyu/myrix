@@ -1,0 +1,25 @@
+# Myrix 知识库插件 bundle。
+# 路线 A：平台工具（默认）
+- insert:
+    - id: myrix-knowledge
+      name: "@myrix/dsh-plugin-knowledge"
+      config:
+        controlPlaneUrl: http://127.0.0.1:8787
+        token: !!js process.env.MYRIX_AGENT_TOKEN
+        principalId: !!js process.env.MYRIX_PRINCIPAL_ID
+        tenantId: !!js process.env.MYRIX_TENANT_ID
+        sessionId: !!js process.env.MYRIX_SESSION_ID
+        toolPrefix: myrix_
+        timeoutMs: 15000
+
+# 路线 B：标准 MCP（与路线 A 二选一或并存；连接凭据是静态的，见 ADR-0003）
+# - insert:
+#     - id: mcp-knowledge
+#       name: "@deepseek-ai/dsh-mcp-client"
+#       config:
+#         serverName: enterprise-kb
+#         transport: streamable-http
+#         url: http://kb-gateway.internal/mcp
+#         headers:
+#           Authorization: !!js "Bearer " + (process.env.MYRIX_KB_TOKEN ?? "")
+#         toolCallTimeoutMs: 30000

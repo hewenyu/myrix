@@ -1,0 +1,22 @@
+{
+  "name": "@myrix/dsh-plugin-entitlement",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 侧功能裁剪：按主体授权对工具集施加掩码，实现插件/功能的按人启用",
+  "main": "./src/plugin.ts",
+  "types": "./src/plugin.ts",
+  "exports": {
+    ".": "./src/plugin.ts"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@myrix/contracts": "workspace:*",
+    "@myrix/dsh-shim": "workspace:*"
+  }
+}

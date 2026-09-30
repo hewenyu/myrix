@@ -1,0 +1,14 @@
+# Myrix 治理插件（PEP）bundle 的默认行。
+# profile 层的 cordis.patch.yml 可按 id 覆盖这里的 config（整块替换）。
+# 字段含义见 packages/dsh-plugin-governance/src/plugin.ts 的 Config。
+- insert:
+    - id: myrix-governance
+      name: "@myrix/dsh-plugin-governance"
+      config:
+        controlPlaneUrl: http://127.0.0.1:8787
+        token: !!js process.env.MYRIX_AGENT_TOKEN
+        principalId: !!js process.env.MYRIX_PRINCIPAL_ID
+        sessionId: !!js process.env.MYRIX_SESSION_ID
+        failClosed: true
+        timeoutMs: 3000
+        cacheTtlMs: 15000

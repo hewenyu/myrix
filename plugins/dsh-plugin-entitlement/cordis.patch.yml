@@ -1,0 +1,12 @@
+# Myrix 功能授权插件 bundle 的默认行。
+# toolOwners 由控制面渲染 profile 时下发（pluginId → 工具名）。
+- insert:
+    - id: myrix-entitlement
+      name: "@myrix/dsh-plugin-entitlement"
+      config:
+        controlPlaneUrl: http://127.0.0.1:8787
+        token: !!js process.env.MYRIX_AGENT_TOKEN
+        principalId: !!js process.env.MYRIX_PRINCIPAL_ID
+        toolOwners: !!js JSON.parse(process.env.MYRIX_TOOL_OWNERS ?? '[]')
+        refreshIntervalMs: 60000
+        timeoutMs: 3000

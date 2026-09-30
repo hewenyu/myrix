@@ -1,0 +1,22 @@
+{
+  "name": "@myrix/dsh-plugin-governance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 侧 PEP：在工具执行前调用 Myrix 控制面 PDP，把治理结论翻译为沙箱/审批配置",
+  "main": "./src/plugin.ts",
+  "types": "./src/plugin.ts",
+  "exports": {
+    ".": "./src/plugin.ts"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@myrix/contracts": "workspace:*",
+    "@myrix/dsh-shim": "workspace:*"
+  }
+}
