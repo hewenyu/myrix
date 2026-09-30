@@ -1,0 +1,7 @@
+packages:
+  - "packages/*"
+  - "plugins/*"
+  - "apps/*"
+
+# Myrix 自己维护依赖；DSH 本体通过 vendor/deepseek-harness 子模块提供，
+# 或按发布版本以 npm 依赖方式消费（见 docs/adr/0001）。

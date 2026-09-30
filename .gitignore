@@ -1,0 +1,21 @@
+# deps / build
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# runtime state
+data/
+*.log
+
+# env
+.env
+.env.*
+!.env.example
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

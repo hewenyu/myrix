@@ -1,0 +1,33 @@
+{
+  "name": "myrix",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Myrix —— 基于 DeepSeek Harness 的企业私有化 Agent 平台",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "bootstrap": "bash scripts/bootstrap.sh",
+    "submodule:init": "git submodule update --init --recursive vendor/deepseek-harness",
+    "submodule:status": "git submodule status vendor/deepseek-harness",
+    "submodule:unshallow": "git -C vendor/deepseek-harness fetch --unshallow --tags",
+    "submodule:sync": "git submodule update --remote vendor/deepseek-harness",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx packages/control-plane/src/bin.ts",
+    "console": "tsx packages/control-plane/src/bin.ts",
+    "render:profile": "tsx scripts/render-profile.ts",
+    "demo:decide": "tsx scripts/demo-decide.ts"
+  },
+  "devDependencies": {
+    "@myrix/control-plane": "workspace:*",
+    "@myrix/registry": "workspace:*",
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

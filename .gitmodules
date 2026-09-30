@@ -1,0 +1,3 @@
+[submodule "vendor/deepseek-harness"]
+	path = vendor/deepseek-harness
+	url = git@github.com:hewenyu/deepseek-harness.git
