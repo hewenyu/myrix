@@ -1,0 +1,45 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+{{- /*
+The internal wake API token. The BFF (session router) presents it when it asks
+the Cell Manager to raise a cell. Two supported sources:
+
+  * cellManager.internal.existingSecret: an operator-managed Secret, preferred
+    for private deployments and for SaaS where the control plane renders the
+    same value.
+  * cellManager.internal.token: an inline value for development only. It ends
+    up in the release history, which is why _validate.tpl refuses it when
+    profile=private.
+
+When neither is set, a random token is generated on install and preserved on
+upgrade via the lookup guard below: the manager and the BFF must agree on it.
+*/ -}}
+{{- if and .Values.cellManager.internal.enabled (not .Values.cellManager.internal.existingSecret) -}}
+{{- $name := include "myrix.internal.secretName" . -}}
+{{- $key := include "myrix.cellManager.internalSecretKey" . -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
+{{- $token := "" -}}
+{{- if and $existing (index $existing.data $key) -}}
+{{- $token = index $existing.data $key | b64dec -}}
+{{- else if .Values.cellManager.internal.token -}}
+{{- $token = .Values.cellManager.internal.token -}}
+{{- else -}}
+{{- $token = randAlphaNum 48 -}}
+{{- end -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+  annotations:
+    myrix.io/rotatable: "true"
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+type: Opaque
+data:
+  {{ $key }}: {{ $token | b64enc | quote }}
+{{- end }}

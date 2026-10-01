@@ -1,0 +1,119 @@
+# Myrix Node runtime images — targets: `bff`, `gateway`, `cell`.
+#
+# Build (per CI):  docker buildx build --platform linux/amd64,linux/arm64 \
+#                    -f deploy/images/Dockerfile.node --target <bff|gateway|cell> .
+#
+# ## Design
+#
+#   * One shared `deps` stage installs **only** the service closure — root
+#     devDependencies (for `tsx`/`esbuild`) plus `@myrix/bff...`,
+#     `@myrix/model-gateway...` and `@myrix/novel-web...`. That closure is
+#     verified to contain **no `@deepseek-ai/*` package**, so BFF and gateway
+#     never ship DSH (hard requirement). esbuild is an explicit, pinned root
+#     dependency: the sanctioned compiler resolves node_modules/.bin/esbuild
+#     without relying on accidental transitive hoisting.
+#   * `bff` and `gateway` run the TypeScript sources directly with
+#     `node --import tsx` — we do **not** pretend `tsc` emitted JavaScript
+#     (`tsconfig.json` is `noEmit`). The web bundle is built here with Vite and
+#     served by the BFF from its production static path.
+#   * `cell` additionally installs the **locked** DSH runtime in
+#     `tests/poc/.dsh-install` (`@deepseek-ai/dsh@0.2.0-rc.2`, hoisted linker per
+#     its own `.npmrc`) and runs the real profile factory
+#     (`tests/poc/lib/cell-profile.mjs` + `probes/` + `compile-plugins.mjs`) via
+#     `node deploy/images/cell-entry.mjs`. The Cell is the only image that carries
+#     DSH; the npm package's own MIT `LICENSE` is preserved byte for byte.
+#   * No `--mount=type=cache`, no `cache-from`/`cache-to`. A normal layer repeated
+#     across stages is a DAG edge inside one build, not a cross-build cache. CI
+#     builds with `no-cache: true` and `pull: true`.
+#   * Every final image is non-root (UID/GID 65532, the `NonRootUID`/`NonRootGID`
+#     contract in `apps/cell-manager/internal/cell/k8s/objects.go`) on a Debian
+#     slim base for multi-arch. A read-only rootfs is assumed: only `/tmp` and,
+#     for the Cell, the persistent `$DSH_HOME` volume are writable.
+#
+# LICENSE / NOTICE are kept in every image; the Cell also keeps the DSH npm
+# package's own MIT LICENSE inside the locked install.
+
+ARG NODE_VERSION=24.13.0
+ARG PNPM_VERSION=10.33.0
+
+# --- base: Node + pnpm, no dependencies yet ---------------------------------
+FROM node:${NODE_VERSION}-bookworm-slim AS node-base
+ARG PNPM_VERSION
+# CI pins the same pnpm. npm's cache is removed so it does not land in a layer.
+RUN npm install --global "pnpm@${PNPM_VERSION}" \
+ && npm cache clean --force \
+ && rm -rf /root/.npm
+# 65532 matches apps/cell-manager/internal/cell/k8s/objects.go (NonRootUID/GID).
+RUN groupadd --gid 65532 myrix \
+ && useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin myrix
+WORKDIR /app
+ENV CI=1
+
+# --- deps: the service closure; never any @deepseek-ai/* --------------------
+FROM node-base AS deps
+# `.dockerignore` drops node_modules, dist, data, .env*, .git and vendor, so this
+# copies sources, lockfiles and the tests/poc factory only.
+COPY . .
+# Frozen lockfile; build scripts skipped (esbuild ships its platform binary as an
+# optional dependency, so no postinstall is required). NODE_ENV stays unset here
+# so devDependencies such as tsx and vite are installed.
+RUN pnpm install --frozen-lockfile --ignore-scripts \
+      --filter myrix \
+      --filter "@myrix/bff..." \
+      --filter "@myrix/model-gateway..." \
+      --filter "@myrix/novel-web..." \
+ && rm -rf /root/.cache /root/.local/share/pnpm/store
+# Fail the build if DSH ever leaks into the shared service closure, and prove
+# the esbuild the Cell compiler resolves is present and executable.
+RUN test ! -e /app/node_modules/@deepseek-ai \
+ && test ! -e /app/node_modules/.pnpm/node_modules/@deepseek-ai \
+ && test -x /app/node_modules/.bin/esbuild
+
+# --- web: production Vite bundle, consumed only by the bff target ------------
+FROM deps AS web
+RUN pnpm build:web
+
+# --- bff --------------------------------------------------------------------
+FROM deps AS bff
+COPY --from=web /app/apps/novel-web/dist /app/apps/novel-web/dist
+ENV NODE_ENV=production \
+    MYRIX_STATIC_ROOT=/app/apps/novel-web/dist
+USER 65532:65532
+EXPOSE 8787 8791
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["node", "--import", "tsx"]
+CMD ["apps/bff/src/bin.ts"]
+
+# --- gateway ----------------------------------------------------------------
+FROM deps AS gateway
+ENV NODE_ENV=production
+USER 65532:65532
+EXPOSE 8790
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["node", "--import", "tsx"]
+CMD ["apps/model-gateway/src/bin.ts"]
+
+# --- cell: the only image that installs DSH ---------------------------------
+FROM deps AS cell
+# Locked runtime: tests/poc/.dsh-install pins @deepseek-ai/dsh@0.2.0-rc.2 and its
+# own .npmrc forces node-linker=hoisted (the DSH profile resolver requires it).
+# `--ignore-scripts` is intentionally NOT used: this mirrors the CI install of the
+# locked install exactly.
+RUN pnpm --dir tests/poc/.dsh-install install --frozen-lockfile \
+ && rm -rf /root/.cache /root/.local/share/pnpm/store
+# The locked CLI and its MIT LICENSE must both be present.
+RUN test -x /app/tests/poc/.dsh-install/node_modules/@deepseek-ai/dsh/lib/bin.js \
+ && test -f /app/tests/poc/.dsh-install/node_modules/@deepseek-ai/dsh/LICENSE
+# Create the two writable paths this image expects, owned by the runtime UID.
+# Kubernetes mounts the PVC and the tenant Secret over them; the directories
+# exist so a plain `docker run` under a read-only rootfs still works.
+RUN install -d -o 65532 -g 65532 -m 0700 /var/lib/myrix/dsh-home \
+ && install -d -o 65532 -g 65532 -m 0700 /var/run/myrix/credentials
+ENV NODE_ENV=production \
+    DSH_HOME=/var/lib/myrix/dsh-home \
+    MYRIX_DRIVER_PORT=8404
+USER 65532:65532
+EXPOSE 8404
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["node"]
+CMD ["deploy/images/cell-entry.mjs"]

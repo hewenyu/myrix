@@ -41,11 +41,24 @@ export interface DecideInput {
   action: string;
   resource: PolicyResource;
   context?: Record<string, unknown>;
+  /**
+   * 本次判定的时刻。缺省用控制面注入的时钟；显式传入可复放/测试。
+   */
+  at?: string | Date;
+}
+
+export interface GovernanceStoreOptions {
+  /** 控制面的时钟；纯函数 `decide` 由这里取 now，缺省为系统时钟 */
+  now?: () => Date;
 }
 
 /**
  * 控制面状态：把身份、RBAC、ABAC、插件授权、知识库联邦与审计放在同一个
  * 可替换的存储边界后面。当前实现是内存版，Postgres 版见 deploy/postgres。
+ *
+ * 时钟：`@myrix/governance` 的 `decide` 是纯函数，不读系统时钟，必须由调用方注入 `now`。
+ * 控制面在这里把"当前时刻"适配进去（`options.now`，缺省 `() => new Date()`），
+ * 这是本文件唯一允许读时钟的地方；判定逻辑本身保持确定性。
  */
 export class GovernanceStore {
   readonly tenants: Tenant[];
@@ -59,15 +72,17 @@ export class GovernanceStore {
 
   private readonly bindings: RoleBinding[];
   private readonly auditLog: AuditEvent[] = [];
+  private readonly clock: () => Date;
   private auditSeq = 0;
 
-  constructor(seed: GovernanceSeed = demoSeed()) {
+  constructor(seed: GovernanceSeed = demoSeed(), options: GovernanceStoreOptions = {}) {
     this.tenants = seed.tenants;
     this.principals = seed.principals;
     this.policies = seed.policies;
     this.grants = [...seed.grants];
     this.roles = seed.roles;
     this.bindings = seed.bindings;
+    this.clock = options.now ?? (() => new Date());
     this.catalog = new PluginCatalog();
     this.catalog.registerAll(seed.catalog);
     this.roleStore = new RoleStore();
@@ -121,6 +136,7 @@ export class GovernanceStore {
   decide(input: DecideInput): DecisionEnvelope {
     const principal = this.getPrincipal(input.principalId);
     const resourceKey = input.resource.type + ":" + input.resource.id;
+    const evaluatedAt = (input.at === undefined ? this.clock() : new Date(input.at)).toISOString();
     if (!principal) {
       const decision: PolicyDecision = {
         effect: "deny",
@@ -128,7 +144,7 @@ export class GovernanceStore {
         matchedRules: [],
         obligations: [],
         policyRevision: this.policyRevision,
-        evaluatedAt: new Date().toISOString(),
+        evaluatedAt,
       };
       return {
         decision,
@@ -149,7 +165,7 @@ export class GovernanceStore {
         matchedRules: [],
         obligations: [],
         policyRevision: this.policyRevision,
-        evaluatedAt: new Date().toISOString(),
+        evaluatedAt,
       };
       const envelope: DecisionEnvelope = {
         decision,
@@ -169,7 +185,7 @@ export class GovernanceStore {
       resource: input.resource,
       context: input.context ?? {},
     };
-    const decision = decide(request, this.policies, { policyRevision: this.policyRevision });
+    const decision = decide(request, this.policies, { policyRevision: this.policyRevision, now: input.at ?? this.clock() });
     const envelope: DecisionEnvelope = {
       decision,
       source: "abac",
@@ -239,7 +255,7 @@ export class GovernanceStore {
     this.auditSeq += 1;
     const full: AuditEvent = {
       id: "evt_" + this.auditSeq.toString().padStart(6, "0"),
-      ts: new Date().toISOString(),
+      ts: this.clock().toISOString(),
       ...event,
     };
     this.auditLog.push(full);

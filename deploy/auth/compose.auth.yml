@@ -1,0 +1,83 @@
+# Copyright 2026 The Myrix Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Myrix 单机 VPS —— 认证层 Compose **片段**（不是可独立运行的文件）。
+#
+# TLS 终止与路由由**宿主上既有的 Nginx** 负责：本片段不定义 `caddy` 服务、
+# 不生成 Caddyfile、没有端口模式分支，也不提供任何 Caddy 兼容层。
+#
+# 用法（与 Lead 的 deploy/vps/compose.yml 合并）：
+#   docker compose -f deploy/vps/compose.yml -f deploy/auth/compose.auth.yml up -d
+#
+# 合并语义：
+#   * keycloak **不在**基底里，是新服务，因此本片段的数组（cap_drop / security_opt /
+#     tmpfs / ports / volumes）不会与基底的同名数组拼接，无需 `!override`。
+#   * 不重复声明基底已有的网络：基底用 `name: myrix-vps` 固定了真实网络名，
+#     片段再声明会把它覆盖掉。keycloak 直接加入同名网络 `myrix`。
+#   * 不重复基底的服务（postgres / bff / cell）与全局 `x-hardening` 锚点；
+#     keycloak 只是**引用**基底的 `provision:` 一次性 job 作为前置依赖
+#     （service_completed_successfully），不重新定义它。
+#
+# 字段以 createAuthConfig().compose 的输出为准；本文件是人工可读的等价参考，
+# 唯一刻意的差异是：用 env_file 承载 KC_* 环境（工厂输出内置 environment 映射），
+# 这样 compose 文件里不出现任何秘密插值。tests/auth-deploy/auth-config.test.mjs
+# 会核对本文件的关键安全字段不漂移。
+
+services:
+  keycloak:
+    # CI 预构建的 immutable 生产镜像（keycloak-sha-<40hex> 或 @sha256:...），
+    # 绝不回退到 latest，也绝不要求镜像名形如 keycloak:<semver>。
+    image: ${MYRIX_IMAGE_KEYCLOAK:?MYRIX_IMAGE_KEYCLOAK must be an immutable myrix:keycloak-sha-<40hex> image}
+    restart: unless-stopped
+    # 官方/预构建镜像本就以 UID 1000 运行；这里显式固定，避免镜像默认值漂移。
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # 唯一启动命令，与 Lead 的 deploy/images/Dockerfile.keycloak CMD 一致：
+    # 首次启动导入 realm；之后 startup import 对已存在的 realm 是跳过语义，
+    # 不会覆盖用户/密码 —— 所以日常启动同样带 --import-realm 也安全。
+    # 绝不 kc.sh build（build 已在 CI 完成）。
+    command: ["start", "--optimized", "--import-realm"]
+    # 全部 KC_* 由工厂的 renderKeycloakEnvFile() 写入 0600 文件；含 DB 口令与
+    # bootstrap admin 口令，因此只挂给 keycloak 一个服务。
+    env_file:
+      - ./auth/keycloak.env
+    # read-only rootfs：Quarkus 需要 /tmp，Keycloak 需要 data（realm import 的父目录）。
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+      - /opt/keycloak/data:rw,noexec,nosuid,size=64m,mode=0700,uid=1000,gid=1000
+    volumes:
+      # realm 文件必须早于启动存在，并只读挂载到 data 下的子目录，运行期不可改写。
+      # 容器以 UID 1000 读取：部署者必须在 `up` 之前仅对该 inode 执行
+      #   sudo chown 1000:1000 ./auth/realm-myrix.json && sudo chmod 0600 ./auth/realm-myrix.json
+      # 宿主父目录保持 0700，**不要** chmod 777 整个目录，也不要把其它秘密一起放开。
+      - ./auth/realm-myrix.json:/opt/keycloak/data/import/realm-myrix.json:ro
+    # 只发布宿主回环：公网只能经宿主 Nginx 的 /auth/ 到达。
+    # 管理端口 9000（health/ready）绝不发布。
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks:
+      - myrix
+    # postgres 健康 + provision 成功退出：独立 Keycloak 库/角色由 provision 显式创建，
+    # 不依赖应用启动时自动迁移（基底 deploy/vps/compose.yml 确有 provision job）。
+    depends_on:
+      postgres:
+        condition: service_healthy
+      provision:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "1.50"
+          memory: 1g
+          pids: 1024
+    # 健康检查问管理端口（容器内 9000），不经过 Nginx 也不发布到宿主。
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; read -r protocol status remainder <&3; test \"$$status\" = 200"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 90s

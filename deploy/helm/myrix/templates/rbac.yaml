@@ -1,0 +1,117 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+{{- if .Values.cellManager.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "myrix.cellManager.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+  {{- if or .Values.cellManager.serviceAccount.annotations .Values.commonAnnotations }}
+  annotations:
+    {{- with .Values.cellManager.serviceAccount.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- if .Values.cellManager.rbac.create }}
+{{- /*
+Authorisation scope. The manager is deliberately NOT a ClusterRole:
+  * TenantCell and its status exist only in the runtime namespace;
+  * StatefulSets, Services and Pods are watched, created and patched only
+    there;
+  * PersistentVolumeClaims and Secrets are read-only (it mounts the
+    per-tenant credential Secret but never reads or writes its contents);
+  * Lease is limited to the release namespace for leader election.
+
+There is no wildcard verb, no wildcard resource and no cluster-scoped grant.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-cell-manager-runtime" (include "myrix.fullname" .) }}
+  namespace: {{ include "myrix.runtime.namespace" . }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["myrix.io"]
+    resources: ["tenantcells"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["myrix.io"]
+    resources: ["tenantcells/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    # Read-only: the manager must never delete a tenant's DSH_HOME.
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    # Read-only, and only so that the manager can validate that a referenced
+    # per-tenant credential Secret exists before a cell is started.
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-cell-manager-runtime" (include "myrix.fullname" .) }}
+  namespace: {{ include "myrix.runtime.namespace" . }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-cell-manager-runtime" (include "myrix.fullname" .) }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "myrix.cellManager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-cell-manager-leader" (include "myrix.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-cell-manager-leader" (include "myrix.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-cell-manager-leader" (include "myrix.fullname" .) }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "myrix.cellManager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

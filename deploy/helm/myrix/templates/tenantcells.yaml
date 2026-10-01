@@ -1,0 +1,71 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+{{- if .Values.runtimeQuota.enabled }}
+{{- /*
+Bounds the shared tier's blast radius. The correct numbers come from the
+Phase 0 density measurements (plan P6: memory per cell, PVCs per node); the
+values here are placeholders an operator must size deliberately.
+*/}}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ printf "%s-runtime" (include "myrix.fullname" .) }}
+  namespace: {{ include "myrix.runtime.namespace" . }}
+  labels:
+    {{- include "myrix.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime
+spec:
+  hard:
+    {{- toYaml .Values.runtimeQuota.hard | nindent 4 }}
+{{- end }}
+{{- range $name, $cell := .Values.tenantCells }}
+{{- $tier := default $.Values.cellDefaults.tier $cell.tier }}
+{{- $spec := $cell }}
+{{- /*
+Example / bootstrap TenantCell. In production the control plane creates these
+objects; the chart only renders them when they are listed under tenantCells,
+which is the private (single tenant) case or a controlled bootstrap.
+
+Business bindings (which user owns which session) never appear here: the CRD
+owns lifecycle only.
+*/}}
+---
+apiVersion: myrix.io/v1alpha1
+kind: TenantCell
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "myrix.runtime.namespace" $ }}
+  labels:
+    {{- include "myrix.labels" $ | nindent 4 }}
+    myrix.io/tenant: {{ required (printf "tenantCells.%s.tenantId is required" $name) (default $name $spec.tenantId) | quote }}
+    myrix.io/cell: {{ $name | quote }}
+spec:
+  tenantId: {{ required (printf "tenantCells.%s.tenantId is required" $name) (default $name $spec.tenantId) | quote }}
+  tier: {{ $tier | quote }}
+  wantRunning: {{ default true $spec.wantRunning }}
+  idleTimeoutSeconds: {{ default $.Values.cellDefaults.idleTimeoutSeconds $spec.idleTimeoutSeconds }}
+  maxWakeAttempts: {{ default $.Values.cellDefaults.maxWakeAttempts $spec.maxWakeAttempts }}
+  runtime:
+    image: {{ required (printf "tenantCells.%s.runtime.image is required" $name) (default $.Values.cellManager.image.repository $spec.runtime.image) | quote }}
+    imagePullPolicy: {{ default "IfNotPresent" (and $spec.runtime $spec.runtime.imagePullPolicy) }}
+    driverPort: {{ default $.Values.cellDefaults.driverPort (and $spec.runtime $spec.runtime.driverPort) }}
+    readyTimeoutSeconds: {{ default $.Values.cellDefaults.readyTimeoutSeconds (and $spec.runtime $spec.runtime.readyTimeoutSeconds) }}
+    {{- if and $spec.runtime $spec.runtime.credentialsSecret }}
+    credentialsSecret: {{ $spec.runtime.credentialsSecret | quote }}
+    {{- end }}
+    {{- if and $spec.runtime $spec.runtime.command }}
+    command:
+      {{- toYaml $spec.runtime.command | nindent 6 }}
+    {{- end }}
+    {{- if and $spec.runtime $spec.runtime.args }}
+    args:
+      {{- toYaml $spec.runtime.args | nindent 6 }}
+    {{- end }}
+  storage:
+    size: {{ default $.Values.cellDefaults.storageSize (and $spec.storage $spec.storage.size) | quote }}
+    {{- if or $.Values.cellDefaults.storageClassName (and $spec.storage $spec.storage.storageClassName) }}
+    storageClassName: {{ default $.Values.cellDefaults.storageClassName (and $spec.storage $spec.storage.storageClassName) | quote }}
+    {{- end }}
+{{- end }}

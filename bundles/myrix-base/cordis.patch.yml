@@ -1,0 +1,126 @@
+# myrix-base bundle patch — Myrix 平台底座的 DSH 核心白名单。
+#
+# 设计约束（platform-plan-v2 §5.1 / D5-D6）：
+#   * 不叠加 `@deepseek-ai/dsh-base`：这一层 insert 就是完整的 Cordis 树。
+#     参考 `@deepseek-ai/dsh-sdk-minimal` 的写法，但去掉它带的 shell/terminal/
+#     subprocess/sandbox/jobs/MCP 行。
+#   * 不装任何代码执行、文件系统、网络抓取类插件（bash/pwsh/terminal/subprocess/
+#     sandbox/tool-fs/tool-web/PTC/workflow/subagent/jobs/goal/MCP/hooks/
+#     plugin-manager/HMR/config-editor/settings/credentials-local/web-app/
+#     session-controller/workspace/schedule/skill-filesystem/agent-instructions）。
+#   * 行顺序不表达加载语义（激活由服务可用性驱动）；分组只是给人看。
+#
+# 与 `dsh-base` 的差异（本文件是白名单，不是逐行禁用）：
+#   * 没有 `jobs` / `tool-jobs` / `goal` / `tool-goal` / `subagent` / `workflow`。
+#   * 没有 `subprocess` / `sandbox` / `sandbox-policy` / shell 与 terminal 行。
+#   * 没有 `tool-fs` / `tool-fs-search` / `fs-*` / agent-instructions。
+#   * 没有 `commands` / `settings` / `config-editor` / `plugin-manager` / `hmr`。
+#   * 没有 `session-query-sqlite` / `storage*` / `otel` / `spill*` / `session-title*`。
+
+- insert:
+    # ── 基础设施 ────────────────────────────────────────────────────────
+    - id: timer
+      name: '@deepseek-ai/cordis-plugin-timer'
+
+    # LLM 服务本身只注册适配器表；真正的模型路由由 myrix-llm-gateway 提供。
+    # P1 阶段先用测试专用 mock 适配器行（仅测试 profile 使用）。
+    - id: llm
+      name: '@deepseek-ai/dsh-llm'
+
+    - id: session
+      name: '@deepseek-ai/dsh-session'
+
+    # Agent 的持久化后端：JSONL，落在 $DSH_HOME/sessions（每个 cell 一个独立 home）。
+    # 不装 `session-query-sqlite`（那是列举/搜索面，D7/D8 明确不要）。
+    - id: session-persistence-jsonl
+      name: '@deepseek-ai/dsh-session-persistence-jsonl'
+      config:
+        root: !!js dshHomePath('sessions')
+        compression: none
+
+    # 共享投影注册表：preset registry 与 token-meter 都把它当硬依赖。
+    - id: session-projection
+      name: '@deepseek-ai/dsh-session-projection'
+
+    - id: system-prompt
+      name: '@deepseek-ai/dsh-system-prompt'
+      config:
+        includeHarnessIdentity: false
+        includeRuntimeContext: false
+        personaPrefix: !!js process.env.DSH_SYSTEM_PROMPT ?? 'You are a helpful assistant.'
+
+    # ── 工具与 Agent 内核 ───────────────────────────────────────────────
+    # 工具注册表。`mode: native` 是 schema 默认值，但显式写出来更能表达
+    # “这里没有任何 PTC runtime”的白名单意图。
+    - id: tools
+      name: '@deepseek-ai/dsh-tools'
+      config:
+        mode: native
+
+    - id: agent
+      name: '@deepseek-ai/dsh-agent'
+
+    - id: agent-loop
+      name: '@deepseek-ai/dsh-agent-loop'
+      config:
+        # 不预置任何声明式 Agent；会话全部由 myrix-runtime-driver 按凭证创建。
+        agents: []
+
+    - id: llm-retry
+      name: '@deepseek-ai/dsh-llm-retry'
+
+    # ── 用量与压缩 ──────────────────────────────────────────────────────
+    - id: token-meter
+      name: '@deepseek-ai/dsh-token-meter'
+
+    - id: compaction
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    # 审批服务。Myrix 的审批走控制面（myrix-policy-guard），
+    # 这里挂 `never` 是为了让 DSH 自带的 ask 路径确定性拒绝，而不是悬空等待。
+    - id: approval
+      name: '@deepseek-ai/dsh-user-approval'
+      config:
+        policy: never
+
+    # ── 附件 ────────────────────────────────────────────────────────────
+    # 平台第一版不做用户上传，但 attachment-local 是 `attachments` 服务定义
+    # 的唯一本地实现，且 conversation 的图片路径依赖它。挂上但不暴露上传面。
+    - id: attachment-local
+      name: '@deepseek-ai/dsh-attachment-local'
+      config:
+        dshHome: !!js dshHomePath('attachments')
+
+    # ── Preset 注册表 ───────────────────────────────────────────────────
+    # `agentPresets.mount(ctx, id)` 的落点。没有这一行，
+    # `setup` 里 `await ctx.agentPresets.mount(...)` 会因为没有服务而失败。
+    - id: agent-preset-registry
+      name: '@deepseek-ai/dsh-agent-preset-registry'
+      config:
+        default: myrix-empty
+
+    # 一个最小 preset：不挂任何工具，只验证 mount/unmount 与 preset 绑定。
+    - id: preset-myrix-empty
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: myrix-empty
+        name: Myrix (no tools)
+        description: 平台底座自检用：无工具、无 shell、无 fs。
+        order: 1
+        plugins: []
+
+    # ── 不变量（可选但便宜）─────────────────────────────────────────────
+    - id: invariants
+      name: '@deepseek-ai/dsh-invariants'
+
+    - id: session-invariant
+      name: '@deepseek-ai/dsh-session/invariant'
+
+    - id: agent-invariant
+      name: '@deepseek-ai/dsh-agent/invariant'
+
+    - id: scope-invariant
+      name: '@deepseek-ai/dsh-scope/invariant'
+
+    - id: agent-loop-invariant
+      name: '@deepseek-ai/dsh-agent-loop/invariant'

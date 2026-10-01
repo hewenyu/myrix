@@ -1,0 +1,290 @@
+# Myrix 单机 VPS 部署（Docker Compose，非 Kubernetes）。
+#
+# 首版部署边界：一台 VPS、一个 PostgreSQL 17 持久卷、四个 Myrix 运行镜像
+# （bff / gateway / cell / keycloak）。TLS 与公网路由由**宿主上既有的 Nginx**
+# 负责：本文件不声明 caddy 服务、不生成 Caddyfile、没有 `--profile tls` 分支。
+# CellManager、Helm、K8s 不参与本编排。
+#
+# Keycloak 通过 `deploy/auth/compose.auth.yml` 覆盖片段引入（见该文件与
+# deploy/auth/README.md），因此**最终部署命令必须同时给出两个文件**：
+#
+#   docker compose -f deploy/vps/compose.yml -f deploy/auth/compose.auth.yml up -d --wait
+#
+# 全部生成物由 `node deploy/vps/init.mjs ...` 产生（0600/0700，不打印秘密）：
+#   .env                        镜像 tag（含 MYRIX_IMAGE_KEYCLOAK）与宿主域名
+#   secrets/postgres-superuser-password   仅 postgres 容器与 provision 读取
+#   secrets/provision.env       建角色用的初始密码（仅 provision 读取）
+#   secrets/migrator.env        迁移角色连接串（仅 migrate / auth / grants 读取）
+#   secrets/bff.env             BFF+works 私密配置（OIDC、签名私钥、Cell 凭据）
+#   secrets/gateway.env         模型网关私密配置（上游 Responses 密钥）
+#   secrets/cell-1.env          单个 Cell 私密配置
+#   auth/keycloak.env           Keycloak 全部 KC_*（含库与 bootstrap admin 口令）
+#   auth/realm-myrix.json       Keycloak realm 导入（仅首次）
+#   auth/nginx-myrix.conf       宿主 Nginx 站点片段（非秘密，由 Lead 安装）
+#   sql/                        一次性 SQL（角色、授权、凭据、身份、Keycloak 库）
+#
+# 安全基线（对齐 docs/adr/0020、0021、0029）：
+#   * 每个服务只挂自己的 env_file：上游密钥只进 gateway，签名私钥/数据库
+#     只进 BFF，Cell 只拿到自己的租户凭据（不含 upstream key / DB / 私钥）。
+#   * 运行角色是独立低权限 LOGIN；建角色/迁移/授权使用独立一次性 job，
+#     迁移角色绝不进入任何常驻服务。
+#   * BFF/gateway/Cell/Keycloak 非 root、read_only + tmpfs；Cell 有持久 home。
+#     PostgreSQL 保留官方镜像的 root 初始化/降权流程及可写数据库目录。
+#   * 只有 BFF 发布宿主端口且**固定**绑定 127.0.0.1:8787；Keycloak 由覆盖片段
+#     发布 127.0.0.1:18080。两者都只能经宿主 Nginx 到达，没有公网 bind 选项。
+#   * **所有服务都在同一个 `myrix` 网络**（含 postgres/provision/migrate/auth/
+#     grants）；不声明网络的服务会落到 compose 自动创建的 default 网络，那样
+#     这些 job 根本无法访问 postgres。
+
+name: myrix-vps
+
+x-hardening: &hardening
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+  cap_drop:
+    - ALL
+
+x-oneshot: &oneshot
+  restart: "no"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 17：唯一有状态依赖。不发布宿主端口，仅编排内网可达。
+  # 镜像按双架构索引摘要固定（17.11-alpine3.24），由 init.mjs 写入 .env。
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: "${MYRIX_IMAGE_POSTGRES:?run deploy/vps/init.mjs first; it writes .env with the pinned images}"
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_USER: myrix_admin
+      POSTGRES_DB: myrix
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    secrets:
+      - postgres_superuser_password
+    volumes:
+      - myrix-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myrix_admin -d myrix"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - myrix
+
+  # ---------------------------------------------------------------------------
+  # 一次性：创建 myrix_migrator / 低权运行 LOGIN，把库 owner 转给 migrator，
+  # 并创建 Keycloak 专用库与低权 LOGIN（独立库，绝不复用业务角色）。
+  # 必须在 migrate 之前，因为迁移脚本自己只创建 NOLOGIN 组角色。
+  # Keycloak 覆盖片段显式等待 provision 成功，再以 --import-realm 启动。
+  # ---------------------------------------------------------------------------
+  provision:
+    <<: *oneshot
+    image: "${MYRIX_IMAGE_POSTGRES:?run deploy/vps/init.mjs first}"
+    # 与私有 SQL/口令文件属主一致；drop ALL 后 root 也不能越过 0600 权限。
+    user: "1000:1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./secrets/provision.env
+    secrets:
+      - postgres_superuser_password
+    volumes:
+      - ./sql:/sql:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'PGPASSWORD="$$(cat /run/secrets/postgres_superuser_password)"; export PGPASSWORD; exec /bin/sh /sql/provision.sh'
+    networks:
+      - myrix
+
+  # ---------------------------------------------------------------------------
+  # 一次性：业务库 + 网关账本迁移。使用 Lead 的 deploy/images/migrate.mjs，
+  # 它要求显式 --target，且只接受迁移角色连接串（忽略 DATABASE_URL）。
+  # auth schema 的迁移由紧随其后的 auth job 单独完成。
+  # ---------------------------------------------------------------------------
+  migrate:
+    <<: *oneshot
+    image: "${MYRIX_IMAGE_BFF:?run deploy/vps/init.mjs first; it writes .env with the image tags}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      provision:
+        condition: service_completed_successfully
+    env_file:
+      - ./secrets/migrator.env
+    environment:
+      NODE_ENV: production
+    entrypoint: ["node", "/app/deploy/images/migrate.mjs", "--target", "business,gateway"]
+    networks:
+      - myrix
+
+  # ---------------------------------------------------------------------------
+  # 一次性：auth schema（sessions/flows/subjects）+ 迁移后的低权授权。
+  # 必须在业务与账本迁移之后，因为 grants 要引用它们建好的 schema。
+  # 脚本从本目录只读挂载（镜像内没有 auth 迁移入口）。
+  # ---------------------------------------------------------------------------
+  auth:
+    <<: *oneshot
+    image: "${MYRIX_IMAGE_BFF:?run deploy/vps/init.mjs first}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - ./secrets/migrator.env
+    environment:
+      NODE_ENV: production
+    volumes:
+      - ./migrate-auth.mjs:/app/deploy/images/migrate-auth.mjs:ro
+    entrypoint: ["node", "/app/deploy/images/migrate-auth.mjs"]
+    networks:
+      - myrix
+
+  # ---------------------------------------------------------------------------
+  # 一次性：迁移之后的低权授权 + Cell 凭据登记（只写令牌摘要，不写明文）
+  # + 唯一 owner 主体登记。用 migrator 角色；必须在 migrate/auth 成功之后。
+  # ---------------------------------------------------------------------------
+  grants:
+    <<: *oneshot
+    image: "${MYRIX_IMAGE_POSTGRES:?run deploy/vps/init.mjs first}"
+    # 与私有 SQL/口令文件属主一致；drop ALL 后 root 也不能越过 0600 权限。
+    user: "1000:1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      auth:
+        condition: service_completed_successfully
+    env_file:
+      - ./secrets/migrator.env
+    volumes:
+      - ./sql:/sql:ro
+    entrypoint: ["/bin/sh", "/sql/grants.sh"]
+    networks:
+      - myrix
+
+  # ---------------------------------------------------------------------------
+  # BFF + works-service（同进程两个监听）：浏览器入口与 Cell 工具回源。
+  # 固定发布 127.0.0.1:8787，由宿主 Nginx 转发；没有可选公网 bind。
+  # OIDC 通过公共 DNS/HTTPS 回到规范 issuer，沿用现有 CDN/源站访问限制。
+  # 不用 extra_hosts 绕过 Cloudflare：宿主 Nginx 可能只允许其来源地址。
+  # ---------------------------------------------------------------------------
+  bff:
+    <<: *hardening
+    image: "${MYRIX_IMAGE_BFF:?run deploy/vps/init.mjs first}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      grants:
+        condition: service_completed_successfully
+    env_file:
+      - ./secrets/bff.env
+    environment:
+      NODE_ENV: production
+      MYRIX_BIND_HOST: 0.0.0.0
+      MYRIX_WORKS_HOST: 0.0.0.0
+      MYRIX_PORT: "8787"
+      MYRIX_WORKS_PORT: "8791"
+    # 固定回环：不允许通过环境变量改成 0.0.0.0 或别的端口。
+    ports:
+      - "127.0.0.1:8787:8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 30s
+    networks:
+      - myrix
+
+  # ---------------------------------------------------------------------------
+  # 模型网关：持有上游 Responses 密钥与配额账本。不发布宿主端口。
+  # ---------------------------------------------------------------------------
+  gateway:
+    <<: *hardening
+    image: "${MYRIX_IMAGE_GATEWAY:?run deploy/vps/init.mjs first}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      grants:
+        condition: service_completed_successfully
+    env_file:
+      - ./secrets/gateway.env
+    environment:
+      NODE_ENV: production
+      MYRIX_GATEWAY_HOST: 0.0.0.0
+      MYRIX_GATEWAY_PORT: "8790"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8790/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - myrix
+
+  # ---------------------------------------------------------------------------
+  # Cell：一个租户 = 一个 Cell = 一个 DSH home。契约与 K8s/镜像一致：
+  #   UID/GID 65532，DSH_HOME=/var/lib/myrix/dsh-home（命名卷，镜像已把该目录
+  #   预创建为 65532 属主，因此首次挂载即继承正确属主）。
+  # 内部 HTTP 默认拒绝；只有精确白名单里的服务 origin 允许 http。
+  # ---------------------------------------------------------------------------
+  cell-1:
+    <<: *hardening
+    image: "${MYRIX_IMAGE_CELL:?run deploy/vps/init.mjs first}"
+    user: "65532:65532"
+    depends_on:
+      grants:
+        condition: service_completed_successfully
+      gateway:
+        condition: service_started
+      bff:
+        condition: service_started
+    env_file:
+      - ./secrets/cell-1.env
+    environment:
+      NODE_ENV: production
+      DSH_HOME: /var/lib/myrix/dsh-home
+      MYRIX_CELL_HOST: 0.0.0.0
+      MYRIX_DRIVER_PORT: "8404"
+    volumes:
+      - myrix-cell-1-home:/var/lib/myrix/dsh-home
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8404/v1/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+    networks:
+      - myrix
+
+volumes:
+  myrix-pgdata:
+  myrix-cell-1-home:
+
+networks:
+  myrix:
+    name: myrix-vps
+
+secrets:
+  postgres_superuser_password:
+    file: ./secrets/postgres-superuser-password

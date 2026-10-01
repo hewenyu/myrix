@@ -5,6 +5,14 @@
 **一句话定位**：DSH 提供 Agent 运行时，Myrix 提供企业治理面——账号体系、RBAC/ABAC 细粒度授权、
 插件与功能裁剪、知识库联邦、管理后台。所有治理能力都通过 DSH 的 Cordis 插件机制挂载，**不 fork、不改 DSH 核心**。
 
+> **当前交付：v0.1 小说工作台，本地首版验收已通过。** 已验证真实 Responses 六工具、双租户进程重启恢复、浏览器编辑及章节上下文闭环；不等同于生产 OIDC / Kubernetes 上线验收。从 [本地启动指南](<docs/implementation/local-development.md>) 开始，并以 [实际验收记录](<docs/implementation/v0.1-acceptance.md>) 查看证据与边界。下文第一至三节保留早期企业治理原型的背景与目录，不能将其演示 API、内存实现或愿景当作当前小说工作台接口；历史演示用 `pnpm dev:legacy`，持久化工作台用 `pnpm dev`。
+
+首版生产形态是**单台 VPS：Docker Compose + 已有 Nginx + 同机 Keycloak**，不是 Kubernetes。
+部署入口见 [单机部署指南](<deploy/vps/README.md>) 和 [备份恢复手册](<deploy/vps/backup-restore.md>)。
+正式镜像只由 PR 合并后的 GitHub Actions 无缓存构建：BFF、Gateway、Cell、Keycloak
+四个组件均发布 `linux/amd64` / `linux/arm64`，部署必须使用同一提交的完整 SHA 标签。
+生产 OIDC、首次改密、公网模型调用与重启恢复仍须在正式镜像部署后实测；离线回归不替代上线验收。
+
 | 项 | 值 |
 | --- | --- |
 | 上游 fork | `git@github.com:hewenyu/deepseek-harness.git` |
@@ -123,31 +131,40 @@ myrix/
 
 ## 四、快速开始
 
+### v0.1 小说工作台（当前开发主线）
+
+当前实现基于 [技术方案](<docs/plan/tech-design-v1.md>) 和 [平台规划](<docs/plan/platform-plan-v2.md>)：React 工作台 → 持久化 BFF → 每租户独立 DSH Cell → 模型网关；小说工具通过 works 服务访问 PostgreSQL。
+
+**模型链路仅使用 Responses；禁止 `chat/completions`，没有兼容入口或失败回退。** 上游模型密钥仅交给模型网关，不能放入浏览器或 Cell。
+
+按 [本地开发与验收指南](<docs/implementation/local-development.md>) 安装锁定 DSH、初始化数据库和配置模型，然后运行：
+
 ```bash
-# 1) 初始化（子模块 + 依赖 + 类型检查 + 测试）
-pnpm bootstrap
-
-# 2) 启动控制面与管理后台（默认 http://127.0.0.1:8787/ ）
+pnpm build:web
 pnpm dev
-#    数据面/后台令牌：MYRIX_ADMIN_TOKEN，默认开发值 dev-admin-token（生产必须覆盖）
-
-# 3) 判定演示：看到两级判定与义务
-pnpm demo:decide
-
-# 4) 按主体渲染 DSH profile
-pnpm render:profile u_1001 --out "${DSH_HOME:-$HOME/.dsh}/profiles/enterprise"
-
-# 5) 单元测试
-pnpm test
+# http://127.0.0.1:8787/ —— 同源工作台与 BFF
 ```
 
-管理后台页面：概览 / 身份与角色 / 权限模拟 / 功能裁剪 / 知识库 / 审计 / 模型与审计边界。
+`pnpm dev` 不会迁移数据库、不使用 mock 模型，也不会替换占用端口的既有服务。它启动 BFF/works、模型网关和两个隔离 Cell；任一启动失败会清理本次启动的子进程。**各模块测试通过不代表真实模型全链路已验收；当前集成状态见开发指南。**
+
+### 历史治理演示（非 v0.1 工作台）
+
+```bash
+pnpm dev:legacy
+# 同样默认使用 8787；不要与 pnpm dev 同时运行
+pnpm demo:decide
+pnpm render:profile u_1001 --out /your/explicit/profile/directory
+```
+
+历史管理后台的概览、身份/角色、权限模拟、功能裁剪、知识库、审计等页面使用演示控制面，不应当作 v0.1 持久化小说产品的验收入口。
 
 ---
 
-## 五、当前完成度（诚实的 M0 状态）
+## 五、历史 M0 治理原型（保留背景，不代表 v0.1 当前验收状态）
 
-已实现并有测试覆盖：
+以下是早期治理演示的实现范围与当时的后续事项。v0.1 已另行实现持久化 BFF/works、网关、独立 Cell 插件与小说工作台，其集成验收请以 [当前开发指南](<docs/implementation/local-development.md>) 为准，不使用下列旧测试数量衡量新主线。
+
+历史原型已实现并有测试覆盖：
 
 - 策略引擎：属性路径、条件算子（含数组/时间/数值）、deny-overrides、义务合并（沙箱取最严、审批取并、范围取交）
 - RBAC：角色继承展开、租户隔离、缺失角色显式暴露
@@ -179,8 +196,9 @@ pnpm test
 
 ## 七、与 DSH 的版本策略
 
-- 子模块锁定到某个提交，CI 与本地都按该提交构建；升级 = 推进子模块 + 跑一次回归（见 `pnpm submodule:sync`）。
-- 生产消费有两种形态：**源码形态**（从 `vendor/deepseek-harness` 本地构建，便于打补丁）与 **发布包形态**（消费 `@deepseek-ai/dsh-*` npm 包，便于灰度升级）。ADR-0001 记录了取舍，M1 需要在 CI 中固化其中一种。
+- [只读子模块](<vendor/deepseek-harness>) 锁定到上述提交，作为源码与契约核对基线；升级须显式推进指针并重新验收，不能直接修改其中源码。
+- 当前本地开发栈与 PoC 使用独立安装、锁定版本的 npm `@deepseek-ai/dsh@0.2.0-rc.2`。**版本号相同不证明 npm 产物与子模块提交是同一构建**；现有运行结果只证明实际安装产物，安装方法见 [本地指南](<docs/implementation/local-development.md>)。
+- 源码构建、发布包来源校验、镜像构建及升级回放仍需在正式发布流水线中固定并验证。若必须改上游，应先在上游 fork 提交补丁，再推进子模块指针并记录链接，而不是绕过只读约定。
 - 深度对接依据全部记录在 [docs/integration/dsh-seams.md](docs/integration/dsh-seams.md)，原始证据（带 `路径:行号`）在 [docs/research/dsh-seams-raw.md](docs/research/dsh-seams-raw.md)。
 
 ---

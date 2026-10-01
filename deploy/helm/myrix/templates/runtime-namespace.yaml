@@ -1,0 +1,36 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+{{- /*
+The Runtime namespace holds tenant data: every cell's DSH_HOME lives on a PVC
+in it. For that reason the chart does NOT create this namespace by default.
+Deleting the namespace would delete the PVCs, and `helm uninstall` must never
+be able to destroy tenant data. Assistive metadata is added instead.
+
+If an operator explicitly opts in with runtime.createNamespace=true, the
+Namespace object is intentionally left out of the release lifecycle by
+carrying keep: true inside the object itself.
+*/ -}}
+{{- if .Values.runtime.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "myrix.runtime.namespace" . }}
+  labels:
+    {{- include "myrix.labels" . | nindent 4 }}
+    myrix.io/runtime-namespace: "true"
+    {{- with .Values.runtime.namespaceLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.runtime.podSecurityAdmission.enabled }}
+    pod-security.kubernetes.io/enforce: {{ .Values.runtime.podSecurityAdmission.level | quote }}
+    pod-security.kubernetes.io/enforce-version: {{ .Values.runtime.podSecurityAdmission.version | quote }}
+    pod-security.kubernetes.io/audit: {{ .Values.runtime.podSecurityAdmission.audit | quote }}
+    pod-security.kubernetes.io/warn: {{ .Values.runtime.podSecurityAdmission.warn | quote }}
+    {{- end }}
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

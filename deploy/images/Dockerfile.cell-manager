@@ -1,0 +1,52 @@
+# Myrix TenantCell controller image — target: `cell-manager`.
+#
+# Build (per CI):  docker buildx build --platform linux/amd64,linux/arm64 \
+#                    -f deploy/images/Dockerfile.cell-manager --target cell-manager .
+#
+# ## Design
+#
+#   * Cross-compiled, not emulated: the builder always runs on `$BUILDPLATFORM`
+#     and emits a static binary for `$TARGETOS/$TARGETARCH` with `CGO_ENABLED=0`,
+#     so one native build produces both architectures.
+#   * Go version comes from `apps/cell-manager/go.mod` (1.26.1); the builder tag
+#     is pinned to the same version so the module graph cannot be resolved by a
+#     different toolchain.
+#   * Runtime is `gcr.io/distroless/static-debian12:nonroot` (multi-arch): no
+#     shell, no package manager, CA certificates for the Kubernetes API and
+#     system DNS for leader election. It already runs as UID/GID 65532, matching
+#     the non-root requirement; no writable path outside `/tmp` is needed.
+#   * Probes are HTTP (`/healthz`, `/readyz` on `:8081`) and the internal wake
+#     API is `:8405` — both declared by the Helm chart, neither needs a shell.
+#   * No `--mount=type=cache`, no `cache-from`/`cache-to`. CI builds with
+#     `no-cache: true` and `pull: true`.
+#   * LICENSE and NOTICE ship in the image (Apache-2.0 requires it).
+
+ARG GO_VERSION=1.26.1
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build
+ARG TARGETOS
+ARG TARGETARCH
+ENV CGO_ENABLED=0
+WORKDIR /src/apps/cell-manager
+# go.mod/go.sum first: the module download is its own layer, but that layer is a
+# DAG node inside this build, not a cross-build cache.
+COPY apps/cell-manager/go.mod apps/cell-manager/go.sum ./
+RUN go mod download
+# Only the Go module sources are needed; deploy/, docs/ and tests/ stay out.
+COPY apps/cell-manager/ ./
+# Static cross-compile: CGO off, target GOOS/GOARCH drive the output, so the
+# build runs natively on $BUILDPLATFORM for either architecture.
+RUN test -n "${TARGETOS}" && test -n "${TARGETARCH}" \
+ && mkdir -p /out \
+ && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+      go build -trimpath -ldflags="-s -w" \
+      -o /out/cell-manager ./cmd/cell-manager
+
+FROM gcr.io/distroless/static-debian12:nonroot AS cell-manager
+WORKDIR /app
+COPY --from=build /out/cell-manager /app/cell-manager
+# Distribution obligations: keep the licenses alongside the binary.
+COPY LICENSE NOTICE /app/
+USER 65532:65532
+EXPOSE 8080 8081 8405
+ENTRYPOINT ["/app/cell-manager"]

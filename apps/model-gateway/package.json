@@ -1,0 +1,31 @@
+{
+  "name": "@myrix/model-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Myrix 模型网关：OpenAI Responses /v1/responses（禁止 chat/completions，无兼容回退），cell 凭据绑定租户、会话撤权实时校验、按租户/用户预占与结算额度，仅转发到明确配置的上游",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./db": "./src/db/index.ts"
+  },
+  "bin": {
+    "myrix-model-gateway": "./src/bin.ts"
+  },
+  "scripts": {
+    "start": "tsx src/bin.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "test": "vitest run --dir tests"
+  },
+  "dependencies": {
+    "@myrix/governance": "workspace:*",
+    "fastify": "^5.6.0",
+    "kysely": "^0.28.5",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.5"
+  }
+}

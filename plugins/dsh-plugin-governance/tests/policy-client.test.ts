@@ -34,10 +34,11 @@ describe("PolicyClient", () => {
     expect(seenAuth).toBe("Bearer agent-token");
   });
 
-  it("治理平面不可用时 fail-closed（默认拒绝）", async () => {
+  it.each([undefined, false, true])("治理平面不可用时始终拒绝，旧 failClosed=%s 不能开启后门", async (failClosed) => {
     const client = new PolicyClient({
       baseUrl: "http://control-plane:8787",
       token: "agent-token",
+      failClosed,
       fetchImpl: (async () => {
         throw new Error("ECONNREFUSED");
       }) as typeof fetch,

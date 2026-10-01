@@ -71,6 +71,7 @@ describe("evaluateCondition", () => {
 });
 
 describe("decide", () => {
+  const NOW = new Date("2026-09-30T12:00:00.000Z");
   const rules: PolicyRule[] = [
     {
       id: "allow-bash-workspace",
@@ -92,21 +93,44 @@ describe("decide", () => {
   ];
 
   it("deny 优先于 allow", () => {
-    const allowed = decide(request(), rules, { policyRevision: "r1" });
+    const allowed = decide(request(), rules, { policyRevision: "r1", now: NOW });
     expect(allowed.effect).toBe("allow");
     expect(allowed.matched).toBe("explicit-allow");
     expect(allowed.policyRevision).toBe("r1");
 
-    const denied = decide(request({ context: { riskScore: 80 } }), rules);
+    const denied = decide(request({ context: { riskScore: 80 } }), rules, { now: NOW });
     expect(denied.effect).toBe("deny");
     expect(denied.matched).toBe("explicit-deny");
     expect(denied.matchedRules).toEqual(["deny-high-risk"]);
   });
 
   it("无规则命中时默认拒绝（fail-closed）", () => {
-    const decision = decide(request({ action: "tool:unknown" }), rules);
+    const decision = decide(request({ action: "tool:unknown" }), rules, { now: NOW });
     expect(decision.effect).toBe("deny");
     expect(decision.matched).toBe("default-deny");
+  });
+
+  it("时钟由调用方注入：evaluatedAt 取注入值，不读系统时钟", () => {
+    const before = new Date().toISOString();
+    const decision = decide(request(), rules, { now: "2020-01-02T03:04:05.000Z" });
+    expect(decision.evaluatedAt).toBe("2020-01-02T03:04:05.000Z");
+    // 注入的时刻明显早于当前时间，证明没有回退到 Date.now()
+    expect(decision.evaluatedAt < before).toBe(true);
+
+    const asDate = decide(request(), rules, { now: new Date("2021-05-06T07:08:09.000Z") });
+    expect(asDate.evaluatedAt).toBe("2021-05-06T07:08:09.000Z");
+  });
+
+  it("defaultEffect 只接受 deny：allow 在类型层就被拒绝", () => {
+    const decision = decide(request({ action: "tool:unknown" }), rules, {
+      now: NOW,
+      defaultEffect: "deny",
+    });
+    expect(decision.effect).toBe("deny");
+    expect(decision.matched).toBe("default-deny");
+
+    // @ts-expect-error 首版禁止"默认放行"：defaultEffect 的类型已收窄为 "deny"
+    expect(() => decide(request(), rules, { now: NOW, defaultEffect: "allow" })).not.toThrow();
   });
 
   it("租户隔离：别的租户的规则不参与判定", () => {
@@ -117,7 +141,7 @@ describe("decide", () => {
       actions: ["*"],
       resources: ["*"],
     };
-    expect(decide(request(), [tenantRule]).effect).toBe("deny");
+    expect(decide(request(), [tenantRule], { now: NOW }).effect).toBe("deny");
   });
 });
 

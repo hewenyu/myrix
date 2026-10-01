@@ -1,0 +1,47 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "myrix.contractConfigMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  # Single source of truth for the cell lifecycle contract, read by the
+  # control plane (which creates TenantCells) and by operators. The Cell
+  # Manager applies the same defaults internally when a spec field is unset.
+  contract.yaml: |
+    apiGroup: myrix.io
+    kind: TenantCell
+    version: v1alpha1
+    runtimeNamespace: {{ include "myrix.runtime.namespace" . | quote }}
+    defaults:
+      tier: {{ .Values.cellDefaults.tier | quote }}
+      idleTimeoutSeconds: {{ .Values.cellDefaults.idleTimeoutSeconds }}
+      maxWakeAttempts: {{ .Values.cellDefaults.maxWakeAttempts }}
+      readyTimeoutSeconds: {{ .Values.cellDefaults.readyTimeoutSeconds }}
+      driverPort: {{ .Values.cellDefaults.driverPort }}
+      storageSize: {{ .Values.cellDefaults.storageSize | quote }}
+      storageClassName: {{ .Values.cellDefaults.storageClassName | quote }}
+    replicas:
+      allowed: [0, 1]
+      note: "replicas are 0/1 only; scale-to-zero requires an explicit driver idle proof"
+    phases: [Stopped, Starting, Ready, Draining, Sleeping, Waking, Failed]
+    # Real APIs. /v1/admin/idle is the explicit idle-proof endpoint; without it
+    # the controller stays in Draining instead of guessing.
+    driverPaths:
+      ready: {{ .Values.cellDefaults.driverPaths.ready | quote }}
+      drain: {{ .Values.cellDefaults.driverPaths.drain | quote }}
+      idle: {{ .Values.cellDefaults.driverPaths.idle | quote }}
+    managerInternalAPI:
+      setWantRunning: "POST /internal/v1/cells/{cell}/want-running"
+      auth: "Authorization: Bearer <internal token>"
+    credentials:
+      perTenantSecret: true
+      note: "one Secret per tenant; never shared between cells"

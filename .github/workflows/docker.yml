@@ -1,0 +1,176 @@
+# Copyright 2026 The Myrix Authors
+# SPDX-License-Identifier: Apache-2.0
+name: Build and publish containers
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: containers-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: docker.io/hewenyulucky/myrix
+
+jobs:
+  verify:
+    name: Typecheck, PostgreSQL tests and Go checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: myrix_ci_admin
+          POSTGRES_PASSWORD: myrix_ci_admin_password
+          POSTGRES_DB: myrix_ci_store
+        ports: ['5432:5432']
+        # The runner passes service options through argument parsing, not a shell,
+        # so the health command must use double quotes (single quotes break -U).
+        options: >-
+          --health-cmd "pg_isready -U myrix_ci_admin -d myrix_ci_store"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      MYRIX_TEST_DATABASE_URL: postgres://myrix_ci_admin:myrix_ci_admin_password@127.0.0.1:5432/myrix_ci_store
+      MYRIX_TEST_APP_PASSWORD: myrix_ci_app_password
+      BFF_TEST_DATABASE_URL: postgres://myrix_bff_test:myrix_ci_bff_password@127.0.0.1:5432/myrix_ci_bff
+      BFF_TEST_MIGRATION_DATABASE_URL: postgres://myrix_ci_admin:myrix_ci_admin_password@127.0.0.1:5432/myrix_ci_bff
+      MYRIX_GATEWAY_TEST_DATABASE_URL: postgres://myrix_ci_admin:myrix_ci_admin_password@127.0.0.1:5432/myrix_ci_bff
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.13.0'
+          package-manager-cache: false
+      - name: Install locked dependencies without restored caches
+        run: |
+          npm install --global pnpm@10.33.0
+          pnpm install --frozen-lockfile
+          pnpm --dir tests/poc/.dsh-install install --frozen-lockfile
+      - name: Prepare disposable CI databases and non-owner LOGIN
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER" psql -U myrix_ci_admin -d myrix_ci_store -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE myrix_app LOGIN PASSWORD 'myrix_ci_app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+          CREATE ROLE myrix_bff_test LOGIN PASSWORD 'myrix_ci_bff_password' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOBYPASSRLS;
+          GRANT myrix_app TO myrix_bff_test;
+          CREATE DATABASE myrix_ci_bff OWNER myrix_ci_admin;
+          SQL
+          MYRIX_MIGRATE_DATABASE_URL="$MYRIX_TEST_DATABASE_URL" pnpm --filter @myrix/platform-store migrate
+          MYRIX_MIGRATE_DATABASE_URL="$BFF_TEST_MIGRATION_DATABASE_URL" pnpm --filter @myrix/platform-store migrate
+      - name: Typecheck and PostgreSQL-backed tests
+        run: |
+          pnpm typecheck
+          pnpm test
+          node --test tests/ci/*.test.mjs tests/containers/*.test.mjs tests/vps/*.test.mjs tests/auth-deploy/*.test.mjs
+      - name: Build browser application
+        run: pnpm build:web
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: apps/cell-manager/go.mod
+          cache: false
+      - name: Test and vet Cell Manager and Helm contracts
+        working-directory: apps/cell-manager
+        run: |
+          go test -count=1 ./...
+          go vet ./...
+
+  images:
+    name: ${{ matrix.component }} / amd64 + arm64
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Publication is restricted to the default branch after PR integration.
+    # A manual dispatch on a feature branch cannot receive publication credentials.
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: DOCKER
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: bff
+            file: deploy/images/Dockerfile.node
+            target: bff
+          - component: gateway
+            file: deploy/images/Dockerfile.node
+            target: gateway
+          - component: cell
+            file: deploy/images/Dockerfile.node
+            target: cell
+          - component: keycloak
+            file: deploy/images/Dockerfile.keycloak
+            target: keycloak
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check environment credentials exist without displaying them
+        env:
+          DOCKER_USER: ${{ secrets.USER }}
+          DOCKER_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          test -n "$DOCKER_USER" || { echo 'DOCKER environment secret USER is missing'; exit 1; }
+          test -n "$DOCKER_TOKEN" || { echo 'DOCKER environment secret TOKEN is missing'; exit 1; }
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+          cache-image: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          cache-binary: false
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.TOKEN }}
+      - name: Component-scoped image tags
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=sha,format=long,prefix=${{ matrix.component }}-sha-
+            type=ref,event=branch,prefix=${{ matrix.component }}-
+            type=raw,value=${{ matrix.component }}-latest,enable={{is_default_branch}}
+      - name: Build fresh and publish both architectures
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=min
+          sbom: true
+      - name: Verify published multi-platform manifest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          test -n "$DIGEST"
+          docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw > manifest.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import assert from "node:assert/strict";
+            const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
+            const platforms = new Set((manifest.manifests ?? []).map(m => `${m.platform?.os}/${m.platform?.architecture}`));
+            assert.ok(platforms.has("linux/amd64"), "published manifest lacks linux/amd64");
+            assert.ok(platforms.has("linux/arm64"), "published manifest lacks linux/arm64");
+            console.log("Verified linux/amd64 and linux/arm64");
+          '
+          printf '### %s\n\n`%s@%s`\n\nVerified: linux/amd64, linux/arm64. No build cache.\n' "$COMPONENT" "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

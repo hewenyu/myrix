@@ -4,7 +4,8 @@
  */
 import { GovernanceStore } from "@myrix/control-plane";
 
-const store = new GovernanceStore();
+// 判定是纯函数：时钟由调用方注入。演示用固定时刻，保证输出可复放。
+const store = new GovernanceStore(undefined, { now: () => new Date("2026-09-30T14:00:00.000Z") });
 
 const scenarios: { principalId: string; action: string; resource: { type: string; id: string }; context?: Record<string, unknown>; note: string }[] = [
   { principalId: "u_1001", action: "tool:bash", resource: { type: "tool", id: "bash" }, context: { riskScore: 10, hour: 14 }, note: "研发用 shell 改代码" },
