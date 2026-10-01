@@ -58,6 +58,14 @@ test('all external actions are pinned to exact Git commits', () => {
   assert.equal([...workflow.matchAll(/persist-credentials: false/g)].length, 2);
 });
 
+test('PostgreSQL service health command uses double quotes so the runner parses -U', () => {
+  assert.match(verify, /--health-cmd "pg_isready -U myrix_ci_admin -d myrix_ci_store"\n/);
+  assert.doesNotMatch(verify, /--health-cmd '/);
+  assert.equal([...verify.matchAll(/--health-cmd /g)].length, 1);
+  assert.equal([...verify.matchAll(/pg_isready -U myrix_ci_admin -d myrix_ci_store/g)].length, 1);
+  assert.match(verify, /image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24\n/);
+});
+
 test('CI installs the locked DSH and runs PostgreSQL-backed gates before publication', () => {
   assert.match(verify, /pnpm install --frozen-lockfile/);
   assert.match(verify, /pnpm --dir tests\/poc\/\.dsh-install install --frozen-lockfile/);

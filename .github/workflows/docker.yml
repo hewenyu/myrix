@@ -25,14 +25,16 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
           POSTGRES_USER: myrix_ci_admin
           POSTGRES_PASSWORD: myrix_ci_admin_password
           POSTGRES_DB: myrix_ci_store
         ports: ['5432:5432']
+        # The runner passes service options through argument parsing, not a shell,
+        # so the health command must use double quotes (single quotes break -U).
         options: >-
-          --health-cmd 'pg_isready -U myrix_ci_admin -d myrix_ci_store'
+          --health-cmd "pg_isready -U myrix_ci_admin -d myrix_ci_store"
           --health-interval 5s --health-timeout 5s --health-retries 12
     env:
       MYRIX_TEST_DATABASE_URL: postgres://myrix_ci_admin:myrix_ci_admin_password@127.0.0.1:5432/myrix_ci_store
