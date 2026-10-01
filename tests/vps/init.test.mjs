@@ -282,7 +282,12 @@ test("Keycloak 环境由 createAuthConfig 生成：/auth 相对路径与回环�
   const env = deployment.files[TARGETS.keycloakEnv];
   assert.equal(env.KC_HTTP_RELATIVE_PATH, "/auth");
   assert.equal(env.KC_HTTP_MANAGEMENT_RELATIVE_PATH, "/");
-  assert.equal(env.KC_HOSTNAME, "https://myrix.example.com");
+  // Keycloak 26.8 的真实 discovery 在 /auth 下，KC_HOSTNAME 必须带 /auth；
+  // 浏览器 origin 仍是 https://myrix.example.com。
+  assert.equal(env.KC_HOSTNAME, "https://myrix.example.com/auth");
+  // 修正 KC_HOSTNAME 不得改变浏览器 origin 与逐字节 issuer。
+  assert.equal(deployment.origin, "https://myrix.example.com");
+  assert.equal(deployment.oidc.issuer, "https://myrix.example.com/auth/realms/myrix");
   assert.equal(env.KC_PROXY_HEADERS, "xforwarded");
   assert.equal(env.KC_DB_URL, "jdbc:postgresql://postgres:5432/keycloak");
   assert.equal(env.KC_DB_USERNAME, "keycloak");

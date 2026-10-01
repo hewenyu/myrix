@@ -49,16 +49,21 @@ const auth = createAuthConfig({
 
 | 产物 | 值 | 契约来源 |
 | --- | --- | --- |
-| `origin` | `https://<domain>` | `MYRIX_ORIGIN`（`apps/bff/src/config.ts`） |
+| `origin` | `https://<domain>` | 浏览器站点 origin（**无路径**）：`MYRIX_ORIGIN`、`webOrigins` 与回调都用它 |
+| `keycloakBaseUrl` | `https://<domain>/auth` | Keycloak 公网**基础 URL**（含 `KC_HTTP_RELATIVE_PATH=/auth`）；issuer 与授权/token/JWKS 端点都建立在它之上 |
 | `issuer` | `https://<domain>/auth/realms/myrix` | `MYRIX_OIDC_ISSUER`；`apps/bff/src/oidc.ts` 要求发现结果与它逐字节相等 |
 | `redirectUri` | `https://<domain>/api/v1/auth/callback` | `new URL("/api/v1/auth/callback", origin)`（`apps/bff/src/oidc.ts`） |
-| `webOrigins` | `["https://<domain>"]` | BFF 只接受同源浏览器请求 |
+| `webOrigins` | `["https://<domain>"]` | BFF 只接受同源浏览器请求（用 origin，不含 `/auth`） |
+
+> **`origin` 与 `keycloakBaseUrl` 是两个不同概念，绝不能互相替代。**
+> 浏览器 origin 不含路径；Keycloak 基础 URL 必须含 `/auth`。混用会让
+> `webOrigins`/回调错位，或让 discovery 发布缺少 `/auth` 的 issuer（见 §3.1）。
 
 ### 1.2 返回的接口（全部为纯数据或纯字符串）
 
 | 字段 | 类型 | 用途 |
 | --- | --- | --- |
-| `origin` / `issuer` / `redirectUri` / `webOrigins` | string / string[] | 地址契约，直接对照 BFF 环境 |
+| `origin` / `keycloakBaseUrl` / `issuer` / `redirectUri` / `webOrigins` | string / string[] | 地址契约，直接对照 BFF 环境；`origin` 无路径，`keycloakBaseUrl` 含 `/auth` |
 | `nginxSite` | string | 宿主 Nginx 站点或片段，见第 3 节 |
 | `nginxSiteType` | `"server" \| "snippet"` | 生成的是完整站点还是 location 片段 |
 | `deniedPaths` | string[] | 公网拒绝前缀（默认 `/auth/admin`、`/auth/realms/master`） |
@@ -163,6 +168,46 @@ ON CONFLICT (issuer, subject) DO NOTHING;
 - `KC_PROXY_HEADERS=xforwarded` 让 Keycloak 采信上面那组转发头；
   `KC_HTTP_MANAGEMENT_RELATIVE_PATH=/` 让管理端点保持在 `/health/*`。
 
+### 3.1 修复后的确切配置：`KC_HOSTNAME` 必须含 `/auth`
+
+**症状（已确认的生产故障）**：Keycloak 26.8.0 优化镜像健康、网关/Cell/PG 正常、
+BFF 的库与 RLS 检查全过，但公共 OIDC discovery 返回 HTTP 200 而 `issuer` 不匹配：
+发现问题在 `/auth/realms/myrix/.well-known/openid-configuration`，
+却把它公布为 `https://<domain>/realms/myrix`（authorization/token/JWKS 也缺 `/auth`），
+`createOidcAdapter` 因此拒绝启动。
+
+**根因**：Keycloak **不会**把 `KC_HTTP_RELATIVE_PATH=/auth` 自动拼进 `KC_HOSTNAME`。
+只给裸 origin 时，Keycloak 用 hostname + realm 拼 issuer，于是 `/auth` 丢失。
+
+**修复**：工厂把 `KC_HOSTNAME` 从裸 origin 改为**含 `/auth` 的完整基础 URL**：
+
+```yaml
+# renderKeycloakEnvFile() 写入 auth/keycloak.env（compose.auth.yml 用 env_file 承载）
+KC_HTTP_RELATIVE_PATH: "/auth"
+KC_HOSTNAME: "https://<domain>/auth"   # 修复：以前是 https://<domain>（缺 /auth）
+KC_PROXY_HEADERS: "xforwarded"
+```
+
+由此得到的规范端点（与 `MYRIX_OIDC_ISSUER` 逐字节一致）：
+
+| 端点 | 值 |
+| --- | --- |
+| issuer | `https://<domain>/auth/realms/myrix` |
+| authorization | `https://<domain>/auth/realms/myrix/protocol/openid-connect/auth` |
+| token | `https://<domain>/auth/realms/myrix/protocol/openid-connect/token` |
+| JWKS | `https://<domain>/auth/realms/myrix/protocol/openid-connect/certs` |
+
+**这不是新的授权决策**：没有新增/放宽任何放行路径，也没有改 realm、owner UUID、
+凭据、`redirectUri`、`webOrigins` 或数据库 subject 映射。它只是让 Keycloak
+**遵守既有的规范 issuer 契约**（`https://<domain>/auth/realms/myrix`）。
+浏览器 origin 仍是 `https://<domain>`（不含 `/auth`），`webOrigins` 与回调继续用它；
+`/auth/admin`、`/auth/realms/master`、默认拒绝清单与端口拓扑全部不变。
+回归见 §11 的“公共 origin 与 Keycloak 基础 URL 是两个不同值”与
+“每个装配变体都从已发射 env 重建出 /auth 下的 issuer 与端点”。
+
+> **不要**用 `frontendUrl`（realm 级）作为绕行修复：那是另一条配置来源，
+> 会与镜像 build-time 的 `KC_HTTP_RELATIVE_PATH` 和宿主路由产生第二套真相。
+
 集成由 Lead 负责（本目录不改 VPS）：把片段合并进已有站点（或把全新站点文件放进 `conf.d/`），
 `nginx -t` 通过后再 `reload`；既有站点的备份与灰度也由 Lead 另行安排，**不去实际 VPS 验证**。
 
@@ -186,7 +231,8 @@ docker compose -f deploy/vps/compose.yml -f deploy/auth/compose.auth.yml up -d
    （compose 会直接报 `can't set distinct values`）。
 
 合并后已核对（工厂输出与参考片段一致）：`read_only: true`、`user: "1000:1000"`、
-`cap_drop: [ALL]`、`KC_HTTP_RELATIVE_PATH=/auth`、`KC_HTTP_MANAGEMENT_RELATIVE_PATH=/`、
+`cap_drop: [ALL]`、`KC_HTTP_RELATIVE_PATH=/auth`、`KC_HOSTNAME=https://<domain>/auth`
+（含 `/auth`，见 §3.1）、`KC_HTTP_MANAGEMENT_RELATIVE_PATH=/`、
 `KC_PROXY_HEADERS=xforwarded`、命令为 `start --optimized --import-realm`（见第 7 节）、
 端口只有 `127.0.0.1:18080:8080`。
 
@@ -331,6 +377,8 @@ Keycloak 的 startup import 是**“创建/跳过”语义**：realm 已存在�
 
 1. **issuer 精确匹配**：`curl -s https://<domain>/auth/realms/myrix/.well-known/openid-configuration | jq -r .issuer`
    必须**逐字节**等于 `https://<domain>/auth/realms/myrix`；否则 `apps/bff/src/oidc.ts` 会拒绝。
+   同一个 `jq` 里还要核对 `authorization_endpoint` / `token_endpoint` / `jwks_uri`
+   都带 `/auth` 前缀（见 §3.1），它们是同一个 `KC_HOSTNAME` 基础 URL 推导出来的。
 2. **管理端点可用**：容器内 `curl -fsS http://127.0.0.1:9000/health/ready` 返回 `UP`；
    宿主上 `curl -sI http://127.0.0.1:18080/auth/realms/myrix/.well-known/openid-configuration` 为 200。
 3. **首次导入 / 改密 / 重启不重置（用真实 Actions 镜像验收，本目录未实测）**：
@@ -366,6 +414,19 @@ owner 确定 UUID 与临时密码、`/auth` 相对路径与管理根路径、Key
 snippet 模式、库隔离 + provision 前置依赖、startup import 不覆盖语义、纯函数与无 `latest`、
 `compose.auth.yml` 参考片段的关键安全字段不漂移，以及
 “secret 不进入 describe/notes/错误信息/脱敏输出”的负例。
+
+其中三条是本次线上 issuer 故障的回归（见 §3.1）：
+
+- **公共 origin 与 Keycloak 基础 URL 是两个不同的值**：断言
+  `keycloakBaseUrl === origin + KC_HTTP_RELATIVE_PATH`、`origin` 无路径、
+  `webOrigins`/`redirectUri` 用 origin 而 `issuer` 用 `keycloakBaseUrl`；
+- **每个装配变体都从已发射 env 重建出 /auth 下的 issuer 与端点**：对默认、snippet、
+  换域名、换端口、IPv6 回环、换挂载目录、declareNetwork、长域名等变体，断言
+  `KC_HOSTNAME` 含且仅含一次 `/auth`，并用它重建出 `/auth/realms/myrix` 下的
+  issuer/authorization/token/JWKS，且与 `MYRIX_OIDC_ISSUER` 逐字节一致；
+  同时用“把 `KC_HOSTNAME` 改回裸 origin”的负例证明该回归能捕获故障；
+- **不重复 /auth、不污染浏览器字段**：`KC_HOSTNAME` 只出现一次 `/auth`，
+  `origin`/`webOrigins`/`redirectUri`/realm 导入里都不得出现 `/auth/realms`。
 
 `render-auth.test.mjs` 是 renderer 的 CLI 回归（子进程，输出只写 `os.tmpdir()`）：
 首次渲染的 0700/0600、**默认 no-clobber**（重复运行拒绝且既有文件 bytes 不变）、
