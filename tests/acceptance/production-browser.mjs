@@ -109,6 +109,7 @@ const SAFE_MESSAGES = Object.freeze({
   chapter_not_persisted: '刷新前经同源 API 读取章节正文与提交内容不一致',
   chapter_not_visible_after_reload: '刷新页面后章节正文未从服务端恢复',
   session_create_failed: '通过工作台 UI 创建助手会话失败',
+  session_revoke_failed: '撤销助手会话未返回 204；会话可能仍然有效，拒绝把本次验收标记为通过',
   unexpected_model_activity: '未发送任何模型请求，但会话里出现了消息',
   unexpected_error: '浏览器或平台验收失败；原始错误已按策略脱敏（不含 Playwright/网络细节）',
 });
@@ -274,6 +275,17 @@ export function passwordChangeReport(progress) {
     passwordChangeAttempted: attempted,
     passwordChangeUncertain: uncertain,
   };
+}
+
+/**
+ * 会话撤销是否真的成功：只有 204 才算成功。
+ *
+ * 这是纯校验：非 204（含缺失/异常的响应对象）一律抛固定 code `session_revoke_failed`，
+ * 绝不允许"撤销失败但仍然 passed=true"的验收结果。绝不回显响应体/状态以外的任何原文。
+ */
+export function assertSessionRevoked(response) {
+  if (!response || response.status !== 204) throw new AcceptanceError('session_revoke_failed');
+  return true;
 }
 
 /** 只取 pathname：绝不让带查询串（可能含 code/state）的 URL 进入任何输出。 */
@@ -675,7 +687,9 @@ export async function main(env = process.env) {
       'DELETE',
       () => page.getByRole('button', { name: '撤销会话', exact: true }).click(),
     );
-    report.sessionRevoked = revoked.status === 204;
+    // 非 204 不是"撤销成功"：必须显式失败，绝不在此后仍然报告 passed=true。
+    assertSessionRevoked(revoked);
+    report.sessionRevoked = true;
     mark('session-smoke');
 
     if (screenshotDir) {

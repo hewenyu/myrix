@@ -29,6 +29,7 @@ import {
   ENV,
   applyPasswordChangeProgress,
   assertPasswordUpdatePage,
+  assertSessionRevoked,
   createPasswordChangeProgress,
   createPasswordProgressTracker,
   isDirectRun,
@@ -427,6 +428,58 @@ test('改密成功后即使抛错，报告仍保留 passwordChanged（finally �
   // 新口令绝不写盘/进报告：报告里不出现 newPassword 字段。
   assert.equal(/report\.\w*[Nn]ewPassword/.test(CODE), false);
   assert.equal(/JSON\.stringify\(report[\s\S]*?newPassword/.test(CODE), false);
+});
+
+/* ------------------------------------------------------------------ */
+/* 会话撤销失败绝不放行                                                 */
+/* ------------------------------------------------------------------ */
+
+test('撤销会话只有 204 才算成功；非 204 抛固定脱敏 code', () => {
+  // 只有 204 通过。
+  assert.equal(assertSessionRevoked({ status: 204, body: null }), true);
+
+  // 其余状态（含 2xx 的非 204、4xx/5xx、缺失响应）一律固定 code 拒绝。
+  for (const response of [
+    { status: 200 },
+    { status: 202 },
+    { status: 204.5 },
+    { status: 400 },
+    { status: 401 },
+    { status: 403 },
+    { status: 404 },
+    { status: 500 },
+    { status: 0 },
+    { status: null },
+    { status: undefined },
+    { status: '204' },
+    {},
+    null,
+  ]) {
+    assert.throws(
+      () => assertSessionRevoked(response),
+      error => error instanceof AcceptanceError && error.code === 'session_revoke_failed',
+      `expected status ${JSON.stringify(response)} to fail revocation`,
+    );
+  }
+
+  // 固定脱敏：code 可被 redactError 映射，且不含任何响应原文/URL。
+  const redacted = redactError(new AcceptanceError('session_revoke_failed'));
+  assert.equal(redacted.code, 'session_revoke_failed');
+  assert.equal(typeof redacted.message, 'string');
+  holdsNoSecret(redacted);
+});
+
+test('主流程在标记 passed 之前必须先通过 session_revoke_failed 校验（静态契约）', () => {
+  const call = CODE.indexOf('assertSessionRevoked(revoked);');
+  const revokeFlag = CODE.indexOf('report.sessionRevoked = true;');
+  const passed = CODE.indexOf('report.passed = true;');
+  assert.notEqual(call, -1, 'main must call assertSessionRevoked(revoked)');
+  assert.notEqual(revokeFlag, -1, 'main must set report.sessionRevoked = true only after the assertion');
+  assert.notEqual(passed, -1);
+  assert.ok(call < revokeFlag, 'revoked flag must be set only after the assertion passes');
+  assert.ok(revokeFlag < passed, 'passed=true must come after the revocation check');
+  // 绝不再保留"用状态比较直接赋值、失败也继续"的旧写法。
+  assert.equal(/report\.sessionRevoked\s*=\s*revoked\.status\s*===/.test(CODE), false);
 });
 
 /* ------------------------------------------------------------------ */
