@@ -110,12 +110,36 @@ sudo chown 1000:1000 deploy/vps/sql
 
 ```sh
 cd deploy/vps
-docker compose -f compose.yml -f ../auth/compose.auth.yml up -d --wait
+# 首次只起 postgres 与 keycloak：BFF 必须等 Nginx 放通 /auth 后再启动（见下方启动顺序）
+docker compose -f compose.yml -f ../auth/compose.auth.yml up -d --wait \
+  postgres keycloak
 ```
 
 **必须同时给出两个文件**：`deploy/auth/compose.auth.yml` 是 Keycloak 的覆盖片段
 （`keycloak` 服务、realm 挂载、`127.0.0.1:18080`）。只给基底文件会少掉 IdP，
 登录一定失败。
+
+> **启动顺序（重要）**：BFF 启动时会**同步**访问公共 OIDC discovery 并要求
+> discovered `issuer` 逐字节等于 `MYRIX_OIDC_ISSUER`（`apps/bff/src/oidc.ts`）。
+> 因此**必须先在宿主 Nginx 上放通 Keycloak 的规范 HTTPS `/auth` 路由（§1.4），
+> 再启动 BFF**。首次部署推荐分三步，而不是一条命令拉起全部：
+>
+> ```sh
+> # 第 1 步：只起 postgres 与 keycloak（provision 作为依赖会一并运行），不碰 BFF；
+> #        migrate/auth/grants 等其余业务作业留到第 3 步完整启动时运行
+> docker compose -f compose.yml -f ../auth/compose.auth.yml up -d --wait \
+>   postgres keycloak
+> # 第 2 步：按 §1.4 集成 Nginx 并 reload，确认公共 discovery 的 issuer 逐字节等于
+> #        预期的 MYRIX_OIDC_ISSUER，且 authorization/token/JWKS 端点 URL 都位于该
+> #        issuer 之下（带 /auth）
+> curl -fsS https://<DOMAIN>/auth/realms/myrix/.well-known/openid-configuration
+> # 第 3 步：再启动 BFF/gateway/Cell（此时 discovery 必须已经可达）
+> docker compose -f compose.yml -f ../auth/compose.auth.yml up -d --wait
+> ```
+>
+> 若 Nginx 尚未放通 `/auth` 就启动 BFF，BFF 会因拿不到 discovery 或 issuer 不匹配
+> 而反复退出——这是预期的 fail-closed 行为，**不要**为此改成内部 HTTP issuer
+> 或关闭校验。
 
 `up` 会按顺序跑四个**一次性 job**（都是 `restart: "no"`，常驻服务等它们成功）：
 
@@ -153,6 +177,19 @@ PostgreSQL 和四个运行服务均使用 `restart: unless-stopped`；一次性�
    站点的日志、TLS、ACME 或 allowlist 配置；
 5. 回滚：恢复备份的 `/etc/nginx` 后 `nginx -t && systemctl reload nginx`。
 
+**Nginx 必须早于 BFF**：BFF 启动即同步拉取公共 discovery，所以第 2–3 步要在
+启动 BFF 之前完成（见 §1.3 的启动顺序）。这段 `/auth` 路由是 BFF 唯一的公网
+issuer 入口；Nginx 放通后可用
+`curl -fsS https://<DOMAIN>/auth/realms/myrix/.well-known/openid-configuration`
+直接确认 issuer 与各端点都带 `/auth`。默认拒绝（`/auth/admin`、
+`/auth/realms/master`）、回环发布（`127.0.0.1:18080` 与 `127.0.0.1:8787`）、
+现有站点的 allowlist/TLS/ACME 边界全部**保持不变**，也不要为了联调方便
+放宽为公网 bind。
+
+若工作台/SSE 等非认证路由需要先退役维护，那是应用层切换：**先让 BFF 依赖的
+`/auth` 公网路由可用并把 BFF 起成 healthy，再切回 app/SSE 路由**，不要在
+`/auth` 尚不可达时启动 BFF。
+
 BFF 使用公共 DNS 经 HTTPS 访问同一个 issuer，不设置 `extra_hosts` 直连宿主。
 现有 Nginx 若只允许 Cloudflare 来源，Docker 网段的直连会被拒绝；不要通过全局
 放行 Docker 网段来绕过源站保护。正式启动后还要从 BFF 容器验证公共 discovery 与
@@ -170,7 +207,10 @@ docker compose -f compose.yml -f ../auth/compose.auth.yml logs grants migrate
 ```
 
 `openid-configuration` 的 `issuer` 必须逐字节等于
-`https://<DOMAIN>/auth/realms/myrix`（BFF 会拒绝不匹配的 issuer）。浏览器打开
+`https://<DOMAIN>/auth/realms/myrix`（BFF 会拒绝不匹配的 issuer）；
+`authorization_endpoint` / `token_endpoint` / `jwks_uri` 也必须都在 `/auth/realms/myrix`
+之下，它们由同一个含 `/auth` 的 `KC_HOSTNAME` 基础 URL 推出（见
+[../auth/README.md](../auth/README.md) §3.1）。浏览器打开
 `https://<DOMAIN>`，用 `myrix-owner` + 生成时的临时口令登录，首次登录会强制
 改密。**单机部署不使用开发登录**。
 

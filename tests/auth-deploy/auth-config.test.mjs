@@ -66,10 +66,14 @@ const holdsDbSecret = (actual) => typeof actual === "string" && actual.includes(
 /* 契约：issuer / redirect / BFF 环境                                   */
 /* ------------------------------------------------------------------ */
 
-test("issuer / redirect_uri / webOrigins 与 BFF 契约逐字节一致", () => {
+test("issuer / keycloakBaseUrl / redirect_uri / webOrigins 与 BFF 契约逐字节一致", () => {
   const config = build();
   assert.equal(config.origin, `https://${DOMAIN}`);
+  // 浏览器 origin 不含路径；Keycloak 基础 URL 必须含 /auth（KC_HTTP_RELATIVE_PATH）。
+  assert.equal(config.keycloakBaseUrl, `https://${DOMAIN}/auth`);
   assert.equal(config.issuer, `https://${DOMAIN}/auth/realms/myrix`);
+  // issuer 建立在 keycloakBaseUrl 之上，绝不是裸 origin + 路径的巧合。
+  assert.equal(config.issuer, `${config.keycloakBaseUrl}/realms/myrix`);
   // apps/bff/src/oidc.ts: new URL("/api/v1/auth/callback", origin).href
   assert.equal(config.redirectUri, `https://${DOMAIN}/api/v1/auth/callback`);
   assert.deepEqual(config.webOrigins, [`https://${DOMAIN}`]);
@@ -166,12 +170,18 @@ test("owner 只能有一个确定 subject，后续成员由 Lead 用迁移凭据
 /* Keycloak：环境、运行身份、挂载、端口                                 */
 /* ------------------------------------------------------------------ */
 
-test("Keycloak 环境变量：/auth 相对路径、管理根路径、公共 issuer、xforwarded", () => {
+test("Keycloak 环境变量：/auth 相对路径、管理根路径、含 /auth 的公共基础 URL、xforwarded", () => {
   const config = build();
   const env = config.keycloakPublicEnv;
   assert.equal(env.KC_HTTP_RELATIVE_PATH, "/auth");
   assert.equal(env.KC_HTTP_MANAGEMENT_RELATIVE_PATH, "/");
-  assert.equal(env.KC_HOSTNAME, `https://${DOMAIN}`);
+  // KC_HOSTNAME 必须是**含 /auth 的完整基础 URL**：Keycloak 26.8 不会把
+  // KC_HTTP_RELATIVE_PATH 拼进 hostname，只给裸 origin 会发布缺失 /auth 的 issuer。
+  assert.equal(env.KC_HOSTNAME, `https://${DOMAIN}/auth`);
+  assert.equal(env.KC_HOSTNAME, config.keycloakBaseUrl);
+  // 与浏览器 origin 是不同概念：origin 无路径。
+  assert.notEqual(env.KC_HOSTNAME, config.origin);
+  assert.equal(config.origin, `https://${DOMAIN}`);
   assert.equal(env.KC_PROXY_HEADERS, "xforwarded");
   assert.equal(env.KC_HTTP_ENABLED, "true");
   assert.equal(env.KC_HEALTH_ENABLED, "true");
@@ -185,6 +195,96 @@ test("Keycloak 环境变量：/auth 相对路径、管理根路径、公共 issu
   assert.ok(holdsSecret(config.keycloakSecretEnv.KC_DB_PASSWORD));
   assert.ok(holdsSecret(config.keycloakSecretEnv.KC_BOOTSTRAP_ADMIN_PASSWORD));
   assert.equal(config.keycloakSecretEnv.KC_BOOTSTRAP_ADMIN_USERNAME, "kcadmin");
+});
+
+/* ------------------------------------------------------------------ */
+/* 回归：公共 origin 与 Keycloak 基础 URL 是不同概念                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 从**已发射的 Keycloak 运行期 env** 重建公共 OIDC 端点，模拟 Keycloak 发布
+ * discovery 的方式：`KC_HOSTNAME` 是基础 URL，但它**不会**自动带上
+ * `KC_HTTP_RELATIVE_PATH`，所以基础 URL 必须自己已含 `/auth`。
+ *
+ * 这是本次线上故障的核心回归：若 `KC_HOSTNAME` 退化成裸 origin，
+ * 下面的 `issuer` 会变成 `https://<domain>/realms/<realm>`（缺 `/auth`）。
+ */
+const reconstructOidc = config => {
+  const env = config.keycloakPublicEnv;
+  const base = env.KC_HOSTNAME.replace(/\/+$/, "");
+  const realmBase = `${base}/realms/${config.realm}`;
+  return {
+    issuer: realmBase,
+    authorizationEndpoint: `${realmBase}/protocol/openid-connect/auth`,
+    tokenEndpoint: `${realmBase}/protocol/openid-connect/token`,
+    jwksUri: `${realmBase}/protocol/openid-connect/certs`,
+  };
+};
+
+/** 所有需要验证的装配变体：每个变体都必须重建出带 /auth 的 issuer 与端点。 */
+const VARIANTS = Object.freeze([
+  { label: "default" },
+  { label: "snippet", nginxSiteType: "snippet" },
+  { label: "other-domain", domain: "other.example.test" },
+  { label: "keycloak-port", keycloakHostPort: 18081, bffHostPort: 8788 },
+  { label: "ipv6-loopback", keycloakBindHost: "::1" },
+  { label: "auth-mount", composeAuthMount: "./auth-generated" },
+  { label: "declare-network", declareNetwork: true },
+  { label: "long-domain", domain: "very-long-subdomain.auth.example.test" },
+]);
+
+test("公共 origin 与 Keycloak 基础 URL 是两个不同的值（origin 无路径，base 含 /auth）", () => {
+  const config = build();
+  assert.equal(config.origin, `https://${DOMAIN}`);
+  assert.equal(config.keycloakBaseUrl, `https://${DOMAIN}/auth`);
+  // 基础 URL = origin + KC_HTTP_RELATIVE_PATH，二者绝不相同。
+  assert.equal(config.keycloakBaseUrl, `${config.origin}${config.keycloakPublicEnv.KC_HTTP_RELATIVE_PATH}`);
+  assert.notEqual(config.keycloakBaseUrl, config.origin);
+  // webOrigins / redirectUri 用浏览器 origin（无 /auth），issuer 用基础 URL（含 /auth）。
+  assert.deepEqual(config.webOrigins, [config.origin]);
+  assert.equal(config.redirectUri.startsWith(`${config.origin}/api/`), true);
+  assert.equal(config.redirectUri.startsWith(`${config.keycloakBaseUrl}/`), false);
+  assert.equal(config.issuer.startsWith(`${config.keycloakBaseUrl}/realms/`), true);
+});
+
+test("每个装配变体都从已发射 env 重建出 /auth 下的 issuer 与授权/token/JWKS 端点", () => {
+  for (const { label, ...overrides } of VARIANTS) {
+    const config = build(overrides);
+    const env = config.keycloakPublicEnv;
+    // KC_HOSTNAME 必须是含 /auth 的完整基础 URL，绝不等于裸 origin。
+    assert.equal(env.KC_HOSTNAME, `${config.origin}/auth`, `${label}: KC_HOSTNAME 缺少 /auth`);
+    assert.notEqual(env.KC_HOSTNAME, config.origin, `${label}: KC_HOSTNAME 不能退化成裸 origin`);
+    assert.equal(env.KC_HTTP_RELATIVE_PATH, "/auth", `${label}: 相对路径必须仍是 /auth`);
+
+    const oidc = reconstructOidc(config);
+    const expected = `https://${config.domain}/auth/realms/myrix`;
+    assert.equal(oidc.issuer, expected, `${label}: 重建 issuer 不含 /auth`);
+    assert.equal(oidc.issuer, config.issuer, `${label}: 重建 issuer 必须逐字节等于 config.issuer`);
+    // BFF 契约：MYRIX_OIDC_ISSUER 就是它，且必须落在 /auth 下。
+    assert.equal(env.KC_HOSTNAME.includes("/auth"), true, `${label}: 基础 URL 未携带公网路径`);
+    assert.equal(config.bffOidcEnv.MYRIX_OIDC_ISSUER, oidc.issuer, `${label}: BFF issuer 与重建结果不一致`);
+    for (const endpoint of [oidc.issuer, oidc.authorizationEndpoint, oidc.tokenEndpoint, oidc.jwksUri]) {
+      assert.equal(new URL(endpoint).pathname.startsWith("/auth/realms/myrix"), true, `${label}: ${endpoint} 不在 /auth 下`);
+    }
+    // 反例守卫：裸 origin 方案会重建出缺失 /auth 的 issuer。
+    const broken = { ...config, keycloakPublicEnv: { ...env, KC_HOSTNAME: config.origin } };
+    assert.notEqual(reconstructOidc(broken).issuer, config.issuer, `${label}: 裸 origin 必须被该回归检出`);
+  }
+});
+
+test("KC_HOSTNAME 与 authority 之间不出现重复 /auth，也不泄漏到 webOrigins/回调", () => {
+  const config = build();
+  const env = config.keycloakPublicEnv;
+  // 不重复拼接：完整 URL 只出现一次 /auth。
+  assert.equal(env.KC_HOSTNAME.split("/auth").length - 1, 1);
+  // 浏览器可见的 origin 级字段不得出现 /auth 路径。
+  assert.equal(config.origin.includes("/auth"), false);
+  assert.equal(config.webOrigins.some(origin => origin.includes("/auth")), false);
+  assert.equal(config.redirectUri.includes("/auth/realms"), false);
+  // realm 导入的 redirect/webOrigin 仍然只认浏览器 origin。
+  const realm = JSON.parse(config.realmImportJson);
+  assert.deepEqual(realm.clients[0].redirectUris, [config.redirectUri]);
+  assert.deepEqual(realm.clients[0].webOrigins, [config.origin]);
 });
 
 test("Keycloak 服务：只读、UID1000、无能力、/tmp 与 data(tmpfs) 可写、import 只读挂载", () => {
@@ -488,7 +588,7 @@ test("describeAuthConfig 与 keycloak env 渲染都不泄露任何 secret", () =
   const redacted = renderKeycloakEnvFile(config, { redact: true });
   for (const secret of SECRET_VALUES) assert.equal(redacted.includes(secret), false, "redacted env leaked a secret");
   assert.match(redacted, /^KC_DB_PASSWORD=<redacted>$/m);
-  assert.match(redacted, /^KC_HOSTNAME=https:\/\/myrix\.example\.test$/m);
+  assert.match(redacted, /^KC_HOSTNAME=https:\/\/myrix\.example\.test\/auth$/m);
 });
 
 test("describeAuthConfig 暴露的是新的 Nginx 接口，不含 caddy* 字段", () => {

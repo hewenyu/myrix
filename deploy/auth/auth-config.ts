@@ -16,6 +16,10 @@
  *     scope = `openid profile`，Authorization Code + PKCE(S256) + state + nonce，
  *     且 `config.serverMetadata().issuer !== options.issuer` 直接报错 —— 所以
  *     `MYRIX_OIDC_ISSUER` 必须与 Keycloak 实际发布的 issuer **逐字节相等**。
+ *     注意：issuer 含 `/auth`（Keycloak 公网基础路径），而浏览器 origin 不含路径。
+ *     Keycloak 26.8 **不会**把 `KC_HTTP_RELATIVE_PATH` 自动拼进 `KC_HOSTNAME`，
+ *     所以 `KC_HOSTNAME` 必须是含 `/auth` 的完整 URL；只给裸 origin 会让 discovery
+ *     发布缺少 `/auth` 的 issuer，BFF 会拒绝启动。
  *   - `apps/bff/src/config.ts`：OIDC 模式要求 HTTPS origin、`MYRIX_OIDC_ISSUER` 为
  *     HTTPS URL、`MYRIX_DEV_USERS` 必须不存在。
  *   - `apps/bff/src/auth.ts` / `apps/bff/src/auth-store.ts`：
@@ -36,6 +40,16 @@ export const KEYCLOAK_MANAGEMENT_PORT = 9000;
 /** Keycloak 的可写数据目录；read-only rootfs 下必须挂 tmpfs，import 以只读子挂载。 */
 export const KEYCLOAK_DATA_DIR = "/opt/keycloak/data";
 export const KEYCLOAK_IMPORT_DIR = `${KEYCLOAK_DATA_DIR}/import`;
+/**
+ * Keycloak 的公网基础路径。必须与 CI 镜像 `kc.sh build` 时的
+ * `KC_HTTP_RELATIVE_PATH` 逐字节一致（`deploy/images/Dockerfile.keycloak`）。
+ *
+ * 关键：Keycloak **不会**把 `KC_HTTP_RELATIVE_PATH` 自动拼进 `KC_HOSTNAME`。
+ * 因此规范 Keycloak 基础 URL（`keycloakBaseUrl`）必须显式带上该路径，
+ * 否则 discovery 的 `issuer` 会退化成 `https://<domain>/realms/<realm>`（缺 `/auth`），
+ * 与 BFF 期望的 `MYRIX_OIDC_ISSUER` 不匹配，`createOidcAdapter` 会拒绝启动。
+ */
+export const KEYCLOAK_BASE_PATH = "/auth";
 
 export interface AuthImagePins {
   /**
@@ -222,7 +236,14 @@ export interface AuthConfig {
   readonly realm: string;
   readonly images: AuthImagePins;
   readonly domain: string;
+  /** 浏览器可见的站点 origin（无路径），用于 `MYRIX_ORIGIN` / `webOrigins` / 回调。 */
   readonly origin: string;
+  /**
+   * Keycloak 公网基础 URL，**含** `/auth` 相对路径：`<origin>/auth`。它是
+   * Keycloak 发布 issuer 与授权/token/JWKS 端点的基础，绝不等于浏览器 origin。
+   */
+  readonly keycloakBaseUrl: string;
+  /** 规范化 OIDC issuer：`<keycloakBaseUrl>/realms/<realm>`，必须逐字节等于发现结果。 */
   readonly issuer: string;
   readonly redirectUri: string;
   readonly webOrigins: readonly string[];
@@ -384,6 +405,7 @@ function describeAuthConfig(config: AuthConfig): Readonly<Record<string, unknown
     realm: config.realm,
     domain: config.domain,
     origin: config.origin,
+    keycloakBaseUrl: config.keycloakBaseUrl,
     issuer: config.issuer,
     redirectUri: config.redirectUri,
     webOrigins: config.webOrigins,
@@ -761,8 +783,12 @@ export function createAuthConfig(input: CreateAuthConfigInput): AuthConfig {
   const tlsDirectory = assertPathPrefix(input.nginxTlsDirectory ?? `/etc/letsencrypt/live/${siteName}`, "nginxTlsDirectory");
   const ssePathPrefix = assertPathPrefix(input.ssePathPrefix ?? "/api/v1/sessions/", "ssePathPrefix");
 
+  // origin 是浏览器可见的站点根（无路径）；keycloakBaseUrl 才是 Keycloak 的公网
+  // 基础 URL，必须显式带上 KC_HTTP_RELATIVE_PATH=/auth。二者是不同概念：
+  // webOrigins/redirectUri/回调用 origin，issuer 与 Keycloak 端点用 keycloakBaseUrl。
   const origin = `https://${domain}`;
-  const issuer = `${origin}/auth/realms/${realm}`;
+  const keycloakBaseUrl = `${origin}${KEYCLOAK_BASE_PATH}`;
+  const issuer = `${keycloakBaseUrl}/realms/${realm}`;
   const redirectUri = `${origin}/api/v1/auth/callback`;
   const deniedPaths = ["/auth/admin", "/auth/realms/master", ...(input.extraDeniedPaths ?? [])].map(path =>
     assertPathPrefix(path, "deniedPaths"),
@@ -793,10 +819,13 @@ export function createAuthConfig(input: CreateAuthConfigInput): AuthConfig {
     KC_DB_USERNAME: keycloakDbUser,
     KC_HTTP_ENABLED: "true",
     // 与 CI 镜像 build-time 值一致（deploy/images/Dockerfile.keycloak）。
-    KC_HTTP_RELATIVE_PATH: "/auth",
+    KC_HTTP_RELATIVE_PATH: KEYCLOAK_BASE_PATH,
     // 管理面（health/metrics）独立端口与根相对路径；9000 不发布到宿主。
     KC_HTTP_MANAGEMENT_RELATIVE_PATH: "/",
-    KC_HOSTNAME: origin,
+    // 必须是**完整基础 URL 且含 /auth**：Keycloak 26.8 不会把 KC_HTTP_RELATIVE_PATH
+    // 自动拼进 KC_HOSTNAME，只给 origin 会让 discovery 发布
+    // https://<domain>/realms/<realm>（缺 /auth），与 BFF 的 MYRIX_OIDC_ISSUER 不符。
+    KC_HOSTNAME: keycloakBaseUrl,
     KC_PROXY_HEADERS: "xforwarded",
     KC_HEALTH_ENABLED: "true",
     KC_HTTP_PORT: String(KEYCLOAK_HTTP_PORT),
@@ -858,7 +887,7 @@ export function createAuthConfig(input: CreateAuthConfigInput): AuthConfig {
   };
 
   const config: AuthConfig = {
-    realm, domain, origin, issuer, redirectUri, webOrigins: [origin],
+    realm, domain, origin, keycloakBaseUrl, issuer, redirectUri, webOrigins: [origin],
     images: Object.freeze({ keycloak: keycloakImage, postgres: postgresImage }),
     nginxSite, nginxSiteType, deniedPaths, keycloakHostPort, bffHostPort,
     realmImport,
@@ -895,6 +924,8 @@ export function createAuthConfig(input: CreateAuthConfigInput): AuthConfig {
     },
     notes: [
       `公共 issuer 必须逐字节等于 ${issuer}（apps/bff/src/oidc.ts 会拒绝不匹配的 issuer）。`,
+      `Keycloak 基础 URL（含相对路径）是 ${keycloakBaseUrl}：KC_HOSTNAME 必须给出完整 URL，Keycloak 不会自动拼上 KC_HTTP_RELATIVE_PATH。`,
+      `浏览器 origin 仍是 ${origin}（不含路径）：webOrigins 与 MYRIX_ORIGIN 用它，issuer/授权/token/JWKS 用 ${keycloakBaseUrl}。`,
       `BFF 回调固定为 ${redirectUri}，由 apps/bff/src/oidc.ts 从 MYRIX_ORIGIN 推导，不接受转发头。`,
       `Keycloak 只发布宿主回环 ${keycloakBindHost}:${keycloakHostPort} -> ${KEYCLOAK_HTTP_PORT}；管理端口 ${KEYCLOAK_MANAGEMENT_PORT} 不发布。`,
       `宿主 Nginx: /auth/ -> 127.0.0.1:${keycloakHostPort}，其余 -> 127.0.0.1:${bffHostPort}，并保留精确回调 /api/v1/auth/callback 与 SSE 关缓冲。`,
