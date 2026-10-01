@@ -29,7 +29,11 @@ describe.skipIf(!businessUrl || !migrationUrl)("persistent production BFF assemb
       { tenant_id: tenantId, user_id: userId, role: "member", status: "active" },
       { tenant_id: tenantId, user_id: adminId, role: "admin", status: "active" },
     ]).execute();
-    const fixture = makeDevelopmentConfig(migrationUrl!, "/unused-test-static-root");
+    // Pure fixture configuration: makeDevelopmentConfig only validates a loopback:55439 myrix_* URL shape and
+    // generates an in-memory signing key, kid and Cell tokens. It performs no database connection, role creation
+    // or provisioning, so this explicit inert synthetic URL is never dialed. All actual database connections below
+    // use the supplied BFF_TEST_* URLs (including the restricted business/auth LOGIN roles), never this template.
+    const fixture = makeDevelopmentConfig("postgres://myrix_fixture_template:myrix_fixture_template@127.0.0.1:55439/myrix_bff_acceptance", "/unused-test-static-root");
     env = fixture.env;
     delete env.MYRIX_STATIC_ROOT;
     env.DATABASE_URL = businessUrl!;
