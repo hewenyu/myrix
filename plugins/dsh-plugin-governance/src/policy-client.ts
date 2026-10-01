@@ -6,7 +6,7 @@ export interface PolicyClientOptions {
   timeoutMs?: number;
   /** 判定结果缓存时长；策略热更新后最多滞后这么久 */
   cacheTtlMs?: number;
-  /** 网络/服务异常时是否 fail-closed（默认 true） */
+  /** @deprecated 仅保留旧配置兼容；网络/服务异常永远拒绝，false 不再允许 fail-open。 */
   failClosed?: boolean;
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -51,7 +51,7 @@ export class PolicyClient {
     } catch (error) {
       // 治理平面不可用时默认拒绝：企业场景下"放行"的代价远高于"阻断"
       return {
-        effect: this.options.failClosed === false ? "allow" : "deny",
+        effect: "deny",
         matched: "default-deny",
         matchedRules: [],
         obligations: [],

@@ -1,0 +1,15 @@
+# Copyright 2026 The Myrix Authors
+# SPDX-License-Identifier: Apache-2.0
+# Pre-build the PostgreSQL/health configuration so the VPS never rebuilds Keycloak
+# at startup. No realm, domain, database password or login credential is baked in.
+# The upstream multi-architecture distribution and its license notices are kept.
+FROM quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc AS keycloak
+ENV KC_DB=postgres \
+    KC_HEALTH_ENABLED=true \
+    KC_HTTP_RELATIVE_PATH=/auth \
+    KC_HTTP_MANAGEMENT_RELATIVE_PATH=/
+RUN /opt/keycloak/bin/kc.sh build
+COPY LICENSE NOTICE /licenses/myrix/
+USER 1000
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
+CMD ["start", "--optimized", "--import-realm"]

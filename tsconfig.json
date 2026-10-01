@@ -10,6 +10,7 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
@@ -21,6 +22,10 @@
     "packages/*/tests/**/*.ts",
     "plugins/*/src/**/*.ts",
     "plugins/*/tests/**/*.ts",
-    "scripts/**/*.ts"
-  ]
+    "scripts/**/*.ts",
+    "apps/*/src/**/*.ts",
+    "apps/*/scripts/**/*.ts",
+    "apps/*/tests/**/*.ts"
+  ],
+  "exclude": ["apps/novel-web"]
 }

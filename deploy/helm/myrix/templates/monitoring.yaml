@@ -1,0 +1,107 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+{{- if .Values.cellManager.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ printf "%s-cell-manager" (include "myrix.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+    {{- with .Values.cellManager.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "myrix.cellManager.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.cellManager.metrics.serviceMonitor.interval }}
+      path: /metrics
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+{{- if .Values.networkPolicy.cellManager.enabled }}
+{{- /*
+Cell Manager network policy. The manager is not a Runtime cell: it talks to the
+API server and to cell drivers, and it is scraped for metrics. Ingress to its
+own ports is limited to the release namespace and to explicitly listed
+monitoring namespaces.
+*/}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-cell-manager" (include "myrix.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "myrix.cellManager.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Metrics scraping.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        {{- range .Values.networkPolicy.cellManager.metricsNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.cellManager.service.metricsPort }}
+    {{- if .Values.cellManager.internal.enabled }}
+    # Internal wake API: the session router calls it. Only the release
+    # namespace by default; add namespaces explicitly if the BFF lives
+    # elsewhere.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        {{- range .Values.networkPolicy.cellManager.internalNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.cellManager.internal.port }}
+    {{- end }}
+  egress:
+    {{- if .Values.networkPolicy.cellManager.apiServerCIDRs }}
+    - to:
+        {{- range .Values.networkPolicy.cellManager.apiServerCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    # Cell drivers inside the runtime namespace: the readiness, drain and
+    # idle-proof calls.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "myrix.runtime.namespace" . | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.cellDefaults.driverPort }}
+    # Leader election leases live in the release namespace.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: 443
+{{- end }}
+{{- end }}

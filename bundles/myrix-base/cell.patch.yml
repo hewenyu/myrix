@@ -1,0 +1,175 @@
+# myrix-base Cell assembly layer — Myrix platform Cell over the whitelist core.
+#
+# WHAT THIS IS
+#   A second, *optional* patch layer for `@myrix/dsh-bundle-myrix-base`. The
+#   bundle's default `dsh.bundle.patch` stays `./cordis.patch.yml` (the core
+#   whitelist), so the existing whitelist PoC (`tests/poc/run-poc.mjs`) is
+#   unaffected by this file. A Cell profile opts in by copying this file to
+#   `<profile>/cordis.patch.yml`; `tests/poc/lib/cell-profile.mjs` is the
+#   supported way to do that (`createCellProfile`).
+#
+# WHY IT IS A SEPARATE LAYER
+#   Every row below needs per-Cell values (cell id, tenant, port, works origin,
+#   gateway URL) and three of them need credentials. Keeping them in the core
+#   whitelist would mean a Cell could not exist without a secret in the bundle,
+#   and the shared whitelist would start opening an HTTP port for every profile
+#   that mounts it (including the tool-surface probes).
+#
+# SECRETS
+#   No secret is written into a profile. Values come from the environment
+#   through `!!js process.env.*`; the variable names are frozen in
+#   `tests/poc/lib/cell-profile.mjs` (`SECRET_ENV`). Credential-bearing rows are
+#   `keys` (public JWKS only — never a private key), `drainToken`,
+#   `revokeToken`, the works-service `token`, and the gateway `cellToken`.
+#
+# ROWS (all real packages; no `dsh-base`, no shell, no fs, no web, no jobs,
+# no goal, no subagent, no settings/config-editor/plugin-manager/hmr)
+#   webserver            Cell HTTP carrier (standalone; NOT `dsh-web-app`)
+#   myrix-principals     `ctx.principals` Agent → principal binding table
+#   myrix-policy-enforcer fail-closed synchronous tool guard
+#   myrix-binding-lease  the only producer of principals liveness AND policy
+#   myrix-runtime-driver POST /v1/commands + SSE, revocation, drain
+#   myrix-llm-gateway    model route: every call goes through the gateway
+#   myrix-novel          the novel vertical: `ctx.novelStore` + 3 preset subtrees
+#   cell-route-seam      TEST-ONLY route declaration (see below)
+#   cell-probe           TEST-ONLY self-check (see below)
+#
+# NOTE ON `myrix-novel`
+#   It is a production row, not an optional extra: without it there is no
+#   `ctx.novelStore` and no `novel-outline` / `novel-chapter` / `novel-bible`
+#   preset, so a Cell has no business tools at all. The tools live only inside
+#   those presets' scopes (`@myrix/novel/preset-tools` rows registered by the
+#   plugin itself); a preset's Agent sees its own intersection and the root
+#   scope sees none of them.
+#
+# NOTE ON THE POLICY BRIDGE (`requirePolicy`)
+#   `myrix-policy-enforcer` refuses every tool call until a policy snapshot is
+#   installed. `myrix-binding-lease` is what installs it, from the same
+#   authoritative works-service snapshot that carries the binding rows. In
+#   production the requirement is explicit: `requirePolicy: true` means a Cell
+#   whose snapshot carries no valid, finite, same-tenant policy refuses to
+#   serve tools. Only a PoC driver-only probe scope sets this to false, and
+#   `tests/poc/lib/cell-profile.mjs` refuses that outside `mode: 'poc'`.
+
+#
+# NOTE ON `cell-route-seam`
+#   The driver now declares its default route through `defaultProvider` /
+#   `defaultModel`, so the production shape needs no extra row and the seam is
+#   disabled by default (`MYRIX_CELL_ROUTE_SEAM` unset). The row is kept for
+#   profiles that compose DSH without the driver's route declaration: it fills an
+#   EMPTY provider/model only, never overriding a declared route.
+
+- insert:
+    # ── Cell HTTP carrier ─────────────────────────────────────────────────
+    # `@deepseek-ai/dsh-host-webserver` is a standalone route-registration
+    # plugin (its only peer is `cordis`). It knows no harness concepts and
+    # serves no files, which is exactly what a Cell needs: the driver registers
+    # its endpoints on it. Using `dsh-web-app` instead would drag in the whole
+    # browser roster (`modules` / `connection` / `ui-*`) this platform forbids.
+    - id: webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      config:
+        host: !!js process.env.MYRIX_CELL_HOST ?? '127.0.0.1'
+        port: !!js Number(process.env.MYRIX_CELL_PORT)
+        compression: 'none'
+
+    # ── Myrix identity ────────────────────────────────────────────────────
+    # Service class; the driver, the PEP, the lease and the model route all
+    # inject it. Without it none of them activate (fail-closed by absence).
+    - id: myrix-principals
+      name: '@myrix/principals'
+
+    # ── Myrix PEP ─────────────────────────────────────────────────────────
+    # Synchronous guard over `ctx.tools`. `allowedTools: []` denies every tool
+    # call: an empty allowlist means "nothing is allowed", never "no opinion".
+    - id: myrix-policy-enforcer
+      name: '@myrix/policy-enforcer'
+      config:
+        allowedTools: !!js (process.env.MYRIX_ALLOWED_TOOLS ?? '').split(',').filter(Boolean)
+
+    # ── Binding lease + policy bridge ─────────────────────────────────────
+    # The ONLY producer of `principals.setLiveness` and of the policy snapshot.
+    # If the works service is unreachable, every `principals.require*` denies
+    # AND the tool guard denies — that is the point. `requirePolicy: true`
+    # makes the policy half explicit: no valid snapshot means no tool call.
+    - id: myrix-binding-lease
+      name: '@myrix/binding-lease'
+      config:
+        cellId: !!js process.env.MYRIX_CELL_ID
+        tenantId: !!js process.env.MYRIX_TENANT_ID
+        origin: !!js process.env.MYRIX_WORKS_ORIGIN
+        token: !!js process.env.MYRIX_WORKS_TOKEN
+        ttlMs: !!js Number(process.env.MYRIX_LEASE_TTL_MS ?? '10000')
+        refreshMs: !!js Number(process.env.MYRIX_LEASE_REFRESH_MS ?? '3000')
+        requirePolicy: true
+
+    # ── Runtime driver ────────────────────────────────────────────────────
+    # POST /v1/commands (create|resume|send|cancel), GET SSE, admin drain/idle/
+    # revoke, GET /v1/ready. `keys` is public JWKS: the Cell never holds a
+    # signing key. Empty/missing key set makes the driver refuse to start.
+    - id: myrix-runtime-driver
+      name: '@myrix/runtime-driver'
+      config:
+        cellId: !!js process.env.MYRIX_CELL_ID
+        tenantId: !!js process.env.MYRIX_TENANT_ID
+        issuer: !!js process.env.MYRIX_ISSUER ?? 'myrix-control-plane'
+        keys: !!js JSON.parse(process.env.MYRIX_GRANT_JWKS)
+        drainToken: !!js process.env.MYRIX_DRAIN_TOKEN
+        revokeToken: !!js process.env.MYRIX_REVOKE_TOKEN
+        # The Cell's default model route. `myrix-runtime-driver` passes these to
+        # `ctx.agents.create()/resume()` as `AgentOptions`, which is what the
+        # vendor agent loop requires before it will issue a model request
+        # (packages/core/agent-loop/src/agent.ts:577-582). Without them the driver
+        # refuses to start — a Cell that cannot name its route must not run.
+        defaultProvider: !!js (process.env.MYRIX_MODEL_PROVIDERS ?? 'myrix-gateway').split(',')[0]
+        defaultModel: !!js (process.env.MYRIX_MODELS ?? '').split(',')[0]
+        generation: !!js process.env.MYRIX_CELL_GENERATION === undefined ? undefined : Number(process.env.MYRIX_CELL_GENERATION)
+        sseMaxBufferedBytes: !!js Number(process.env.MYRIX_SSE_MAX_BUFFERED_BYTES ?? '1048576')
+
+    # ── Model route ───────────────────────────────────────────────────────
+    # Every model call (conversation and compaction) is attributed by session
+    # and forwarded to the enterprise gateway over OpenAI-compatible SSE. The
+    # adapter holds no upstream key; an unattributed call is refused before a
+    # byte leaves the process.
+    - id: myrix-llm-gateway
+      name: '@myrix/llm-gateway'
+      config:
+        baseURL: !!js process.env.MYRIX_GATEWAY_URL
+        cellToken: !!js process.env.MYRIX_GATEWAY_TOKEN
+        providers: !!js (process.env.MYRIX_MODEL_PROVIDERS ?? 'myrix-gateway').split(',').filter(Boolean)
+        models: !!js (process.env.MYRIX_MODELS ?? '').split(',').filter(Boolean)
+        contextWindow: !!js Number(process.env.MYRIX_CONTEXT_WINDOW ?? '100000')
+
+    # ── Novel vertical ────────────────────────────────────────────────────
+    # Real function plugin: provides `ctx.novelStore` (the ONLY exit to the
+    # works service) and registers the three presets. Each preset's subtree
+    # loads the package's own subpath module `@myrix/novel/preset-tools`, which
+    # registers that assistant's tools INSIDE the preset scope. No novel tool is
+    # ever registered globally, and `myrix-policy-enforcer` still intersects the
+    # six names with the deployment allowlist and the policy snapshot.
+    - id: myrix-novel
+      name: '@myrix/novel'
+      config:
+        origin: !!js process.env.MYRIX_WORKS_ORIGIN
+        credential: !!js process.env.MYRIX_WORKS_TOKEN
+
+    # ── TEST-ONLY route seam ──────────────────────────────────────────────
+    # Disabled unless the deployment explicitly asks for it. See the header.
+    - id: myrix-cell-route-seam
+      name: './plugins/cell-route-seam.mjs'
+      disabled: !!js process.env.MYRIX_CELL_ROUTE_SEAM !== 'waterfall'
+      config:
+        provider: !!js process.env.MYRIX_MODEL_PROVIDERS ?? 'myrix-gateway'
+        model: !!js (process.env.MYRIX_MODELS ?? '').split(',')[0]
+
+    # ── TEST-ONLY self-check probe ────────────────────────────────────────
+    # Registers one echo tool, drives one real agent turn through the real
+    # agent loop and reports what the real PEP did. Never enabled outside the
+    # PoC (`tests/poc/lib/cell-profile.mjs` sets the flag).
+    - id: myrix-cell-probe
+      name: './plugins/cell-probe.mjs'
+      disabled: !!js process.env.MYRIX_CELL_PROBE !== '1'
+      config:
+        out: !!js process.env.MYRIX_CELL_PROBE_OUT
+        provider: !!js process.env.MYRIX_MODEL_PROVIDERS ?? 'myrix-gateway'
+        model: !!js (process.env.MYRIX_MODELS ?? '').split(',')[0]

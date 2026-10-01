@@ -1,0 +1,17 @@
+{
+  "name": "@myrix/principals",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Myrix Cell 侧身份注册表：Agent → 授权主体 的进程内绑定（WeakMap 跟随 scope 生命周期、撤权即时失效、活性外部提供）",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.2"
+  }
+}

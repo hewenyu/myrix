@@ -1,0 +1,236 @@
+# Copyright 2026 The Myrix Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Myrix platform chart values.
+#
+# Two supported profiles, one chart:
+#   saas    - many tenants, shared tier scaled to zero, cell manager runs
+#             multi-replica with leader election.
+#   private - one tenant, dedicated tier resident, one cell manager replica.
+# The profile only changes defaults; every value can be set explicitly.
+#
+# For local rendering only:  helm template myrix deploy/helm/myrix
+# No value in this file was validated against a live cluster. Cluster-side
+# verification is tracked in docs/implementation/cell-manager.md.
+
+# profile selects the default set of values: saas | private.
+profile: saas
+
+nameOverride: ""
+fullnameOverride: ""
+
+global:
+  # imagePullSecrets applied to the cell manager pods. The Runtime cells use
+  # the same list (rendered into the StatefulSet by the Cell Manager, which
+  # reads spec.runtime, not this value).
+  imagePullSecrets: []
+
+# ---------------------------------------------------------------------------
+# Runtime namespace: where TenantCell StatefulSets and their RWO PVCs live.
+# ---------------------------------------------------------------------------
+runtime:
+  # The only namespace the Cell Manager is authorised to write workloads in.
+  namespace: myrix-runtime
+  # The namespace holds tenant data (PVCs with DSH_HOME). If the chart owns
+  # the Namespace object, `helm uninstall` would delete it and the PVCs with
+  # it. Therefore the chart does NOT create it by default; create it once,
+  # out of band, and keep it out of the release lifecycle.
+  createNamespace: false
+  # Labels added to the namespace when createNamespace is true.
+  namespaceLabels: {}
+  # Pod Security Admission on the runtime namespace. Cells run non-root with a
+  # read-only root filesystem, so they satisfy "restricted". Use "baseline"
+  # only if a future image needs an exemption that has been reviewed.
+  podSecurityAdmission:
+    enabled: true
+    level: restricted
+    version: latest
+    audit: restricted
+    warn: restricted
+
+# ---------------------------------------------------------------------------
+# Cell Manager (Go, controller-runtime)
+# ---------------------------------------------------------------------------
+cellManager:
+  # saas: 2+ so leader election is meaningful. private: 1.
+  replicaCount: 2
+  image:
+    # REQUIRED. No image is published by this repository yet; the operator
+    # builds and pushes one. The chart fails to render if this is empty.
+    repository: ""
+    tag: ""
+    # Defaults to .Chart.AppVersion when tag is empty.
+    pullPolicy: IfNotPresent
+  # Leader election prevents two replicas from scaling the same cell twice.
+  # Leave enabled whenever replicaCount > 1.
+  leaderElection: true
+  leaderElectionID: myrix-cell-manager.myrix.io
+
+  # Internal wake API. The session router (BFF) calls it to set
+  # spec.wantRunning. The router never holds Kubernetes permissions itself.
+  internal:
+    enabled: true
+    port: 8405
+    # Shared bearer token used by the BFF. Provide it out of band:
+    #   saas    - the control plane renders it (see templates/internal-token)
+    #   private - point existingSecret at an operator-managed Secret
+    existingSecret: ""
+    secretKey: token
+    # Development/single-node only. Setting this puts a bearer token in
+    # values.yaml and therefore in the release history. It is refused when
+    # profile=private.
+    token: ""
+
+  # TLS for the internal API. Plaintext in-cluster HTTP is only acceptable in
+  # the development profile or behind a mesh that terminates TLS; otherwise
+  # enable this so the manager serves HTTPS itself (it needs tls.crt/tls.key
+  # under the mounted secret).
+  tls:
+    enabled: false
+    # Name of a TLS secret of type kubernetes.io/tls holding tls.crt/tls.key.
+    secretName: ""
+    # Issue the serving certificate with cert-manager instead of providing it.
+    certManager:
+      enabled: false
+      issuerRef:
+        name: ""
+        kind: ClusterIssuer
+        group: cert-manager.io
+      dnsNames: []
+      duration: 2160h
+      renewBefore: 360h
+
+  service:
+    type: ClusterIP
+    metricsPort: 8080
+    annotations: {}
+
+  metrics:
+    # Prometheus Operator ServiceMonitor.
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      labels: {}
+
+  # Pod security baseline: identical to the cells (non-root, read-only rootfs,
+  # dropped capabilities, seccomp, no service account token).
+  podAnnotations: {}
+  podLabels: {}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile: RuntimeDefault
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+  # +optional extra containers/volumes are intentionally not supported: the
+  # manager runs no sidecar and mounts no writable volume.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  rbac:
+    # Creates the namespace-scoped Role/RoleBinding. Set false only when the
+    # operator brings an equivalent, equally narrow role.
+    create: true
+
+# ---------------------------------------------------------------------------
+# NetworkPolicy baseline
+# ---------------------------------------------------------------------------
+networkPolicy:
+  enabled: true
+  # Runtime namespace: default deny for both directions, then the minimum
+  # openings below.
+  runtime:
+    # Ingress is allowed only from the BFF/router namespace on the driver port.
+    bff:
+      namespace: myrix-system
+      port: 8404
+    # Egress is allowed only to the model gateway and the works service.
+    gateway:
+      namespace: myrix-gateway
+      port: 443
+    works:
+      namespace: myrix-works
+      port: 443
+    # Cluster DNS. Some CNIs exempt DNS automatically; keeping the rule is
+    # harmless and makes the intent explicit.
+    dns:
+      namespace: kube-system
+      port: 53
+  # Cell Manager namespace policies.
+  cellManager:
+    enabled: true
+    # Extra namespaces allowed to scrape metrics (for example monitoring).
+    metricsNamespaces: []
+    # Namespaces allowed to call the internal wake API (normally the release
+    # namespace where the BFF runs).
+    internalNamespaces: []
+    # The manager must reach the Kubernetes API server. Most CNIs treat the
+    # API server as always reachable; if yours does not, set the API server
+    # CIDR here.
+    apiServerCIDRs: []
+
+# ---------------------------------------------------------------------------
+# Runtime namespace guardrails
+# ---------------------------------------------------------------------------
+runtimeQuota:
+  # ResourceQuota bounds the blast radius of a runaway cell count in the
+  # shared tier. Disabled by default because the correct numbers come from the
+  # Phase 0 density measurements (plan P6), not from a guess.
+  enabled: false
+  hard:
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    persistentvolumeclaims: "200"
+
+# ---------------------------------------------------------------------------
+# TenantCell defaults (documentation + the ConfigMap handed to the control
+# plane). The Cell Manager applies the same defaults when a field is unset;
+# these values exist so the control plane and the operator read one source.
+# ---------------------------------------------------------------------------
+cellDefaults:
+  tier: shared
+  idleTimeoutSeconds: 900
+  maxWakeAttempts: 5
+  readyTimeoutSeconds: 120
+  driverPort: 8404
+  storageSize: 10Gi
+  storageClassName: ""
+  # Driver API contract. These are the real paths from tech-design-v1 §3.2;
+  # /v1/admin/idle is the explicit idle-proof endpoint the controller needs
+  # before it may scale a shared cell to zero.
+  driverPaths:
+    ready: /v1/ready
+    drain: /v1/admin/drain
+    idle: /v1/admin/idle
+  contractConfigMap:
+    enabled: true
+    name: ""
+
+# ---------------------------------------------------------------------------
+# Optional example TenantCells. Off by default: in production the control
+# plane creates TenantCells. The map key is the object name; the value is a
+# TenantCell spec. See values-example-cells.yaml for a worked example.
+# ---------------------------------------------------------------------------
+tenantCells: {}
+
+commonLabels: {}
+commonAnnotations: {}

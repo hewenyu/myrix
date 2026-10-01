@@ -1,0 +1,163 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-cell-manager" (include "myrix.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+  {{- if .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml .Values.commonAnnotations | nindent 4 }}
+  {{- end }}
+spec:
+  # >1 replica is safe only because leader election serialises reconciliation.
+  replicas: {{ .Values.cellManager.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "myrix.cellManager.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "myrix.cellManager.labels" . | nindent 8 }}
+        {{- with .Values.cellManager.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Restart on config change: the contract ConfigMap is read at start.
+        checksum/contract: {{ include (print $.Template.BasePath "/cell-contract.yaml") . | sha256sum }}
+        {{- with .Values.cellManager.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "myrix.cellManager.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: {{ .Values.cellManager.securityContext.runAsNonRoot }}
+        runAsUser: {{ .Values.cellManager.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.cellManager.securityContext.runAsGroup }}
+        fsGroup: {{ .Values.cellManager.securityContext.fsGroup }}
+        seccompProfile:
+          type: {{ .Values.cellManager.securityContext.seccompProfile }}
+      {{- with .Values.cellManager.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: manager
+          image: {{ include "myrix.cellManager.image" . }}
+          imagePullPolicy: {{ .Values.cellManager.image.pullPolicy }}
+          args:
+            - --metrics-bind-address=:{{ .Values.cellManager.service.metricsPort }}
+            - --health-probe-bind-address=:8081
+            {{- if .Values.cellManager.internal.enabled }}
+            - --internal-bind-address=:{{ .Values.cellManager.internal.port }}
+            {{- end }}
+            - --leader-elect={{ .Values.cellManager.leaderElection }}
+            - --leader-election-id={{ .Values.cellManager.leaderElectionID }}
+            - --runtime-namespace={{ include "myrix.runtime.namespace" . }}
+          env:
+            - name: MYRIX_RUNTIME_NAMESPACE
+              value: {{ include "myrix.runtime.namespace" . | quote }}
+            {{- if .Values.cellManager.internal.enabled }}
+            - name: MYRIX_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "myrix.internal.secretName" . }}
+                  key: {{ include "myrix.cellManager.internalSecretKey" . }}
+            {{- if .Values.cellManager.tls.enabled }}
+            - name: MYRIX_INTERNAL_TLS_CERT_FILE
+              value: /etc/myrix/tls/tls.crt
+            - name: MYRIX_INTERNAL_TLS_KEY_FILE
+              value: /etc/myrix/tls/tls.key
+            {{- end }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.cellManager.service.metricsPort }}
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+            {{- if .Values.cellManager.internal.enabled }}
+            - name: internal
+              containerPort: {{ .Values.cellManager.internal.port }}
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: {{ .Values.cellManager.securityContext.allowPrivilegeEscalation }}
+            readOnlyRootFilesystem: {{ .Values.cellManager.securityContext.readOnlyRootFilesystem }}
+            runAsNonRoot: {{ .Values.cellManager.securityContext.runAsNonRoot }}
+            runAsUser: {{ .Values.cellManager.securityContext.runAsUser }}
+            runAsGroup: {{ .Values.cellManager.securityContext.runAsGroup }}
+            capabilities:
+              drop:
+                {{- toYaml .Values.cellManager.securityContext.capabilities.drop | nindent 16 }}
+            seccompProfile:
+              type: {{ .Values.cellManager.securityContext.seccompProfile }}
+          resources:
+            {{- toYaml .Values.cellManager.resources | nindent 12 }}
+          volumeMounts:
+            # Writable scratch for Go's temp files, on an otherwise read-only
+            # root filesystem.
+            - name: tmp
+              mountPath: /tmp
+            - name: contract
+              mountPath: /etc/myrix
+              readOnly: true
+            {{- if and .Values.cellManager.internal.enabled .Values.cellManager.tls.enabled }}
+            - name: internal-tls
+              mountPath: /etc/myrix/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: contract
+          configMap:
+            name: {{ include "myrix.contractConfigMapName" . }}
+        {{- if and .Values.cellManager.internal.enabled .Values.cellManager.tls.enabled }}
+        - name: internal-tls
+          secret:
+            secretName: {{ include "myrix.cellManager.tlsSecretName" . }}
+            defaultMode: 0400
+        {{- end }}
+      {{- with .Values.cellManager.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cellManager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cellManager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

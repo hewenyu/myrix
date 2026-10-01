@@ -1,0 +1,66 @@
+# Copyright 2026 The Myrix Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Private profile: exactly one tenant, dedicated (resident) cell.
+#   helm install myrix deploy/helm/myrix -f deploy/helm/myrix/values-private.yaml
+#
+# The private deployment is the same artefacts as SaaS with one tenant and
+# the dedicated tier. It still runs the Cell Manager: a dedicated cell is
+# resident, but its lifecycle (readiness, bootId, failed wakes) must still be
+# authoritative in the CRD.
+profile: private
+
+runtime:
+  namespace: myrix-runtime
+  createNamespace: false
+  podSecurityAdmission:
+    enabled: true
+    level: restricted
+
+cellManager:
+  # One replica: there is nothing to elect between, and a smaller footprint
+  # matters more than controller availability. Keep leader election on so a
+  # future scale-out cannot double-reconcile.
+  replicaCount: 1
+  leaderElection: true
+  internal:
+    enabled: true
+    existingSecret: ""
+  metrics:
+    serviceMonitor:
+      enabled: false
+
+networkPolicy:
+  enabled: true
+  runtime:
+    bff:
+      namespace: myrix-system
+    gateway:
+      namespace: myrix-gateway
+    works:
+      namespace: myrix-works
+
+cellDefaults:
+  # Dedicated cells are resident; idleTimeoutSeconds is therefore irrelevant
+  # (it is retained as a shared-tier fallback only).
+  tier: dedicated
+  storageSize: 50Gi
+
+runtimeQuota:
+  enabled: true
+
+# One tenant, one cell. Edit the tenant id and the credential secret name,
+# then create the Secret out of band:
+#   kubectl -n myrix-runtime create secret generic cell-t1-credentials \
+#     --from-literal=gateway-token=... --from-file=jwks.json
+tenantCells:
+  cell-t1:
+    tenantId: t1
+    tier: dedicated
+    wantRunning: true
+    storage:
+      size: 50Gi
+    runtime:
+      # REQUIRED: operator-supplied image.
+      image: ""
+      credentialsSecret: cell-t1-credentials

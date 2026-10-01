@@ -1,0 +1,48 @@
+# Copyright 2026 The Myrix Authors
+# SPDX-License-Identifier: Apache-2.0
+#
+# SaaS profile: many tenants, shared tier scaled to zero.
+#   helm install myrix deploy/helm/myrix -f deploy/helm/myrix/values-saas.yaml
+#
+# Reminder: cellManager.image.repository must be set by the operator. The
+# repository does not publish an image.
+profile: saas
+
+runtime:
+  namespace: myrix-runtime
+  createNamespace: false
+  podSecurityAdmission:
+    enabled: true
+    level: restricted
+
+cellManager:
+  replicaCount: 2
+  leaderElection: true
+  internal:
+    enabled: true
+    # In SaaS the control plane renders the shared token; the operator may
+    # also point at an existing Secret.
+    existingSecret: ""
+  metrics:
+    serviceMonitor:
+      enabled: true
+
+networkPolicy:
+  enabled: true
+  runtime:
+    bff:
+      namespace: myrix-system
+    gateway:
+      namespace: myrix-gateway
+    works:
+      namespace: myrix-works
+
+cellDefaults:
+  tier: shared
+  idleTimeoutSeconds: 900
+  storageSize: 10Gi
+
+runtimeQuota:
+  enabled: false
+
+tenantCells: {}

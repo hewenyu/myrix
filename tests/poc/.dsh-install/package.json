@@ -1,0 +1,11 @@
+{
+  "name": "@myrix/poc-dsh-install",
+  "version": "0.1.0",
+  "private": true,
+  "description": "隔离的锁定 DSH 运行时安装（Phase0 P1/P2 PoC 专用）。不是 Myrix 的构建依赖：只有 tests/poc 的 smoke 会用它。锁定 @deepseek-ai/dsh 0.2.0-rc.2 —— 与 vendor/deepseek-harness 提交 639ed01 同一版本。",
+  "type": "module",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.0-rc.2"
+  }
+}

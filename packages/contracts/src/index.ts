@@ -4,3 +4,4 @@ export * from "./policy";
 export * from "./entitlement";
 export * from "./knowledge";
 export * from "./audit";
+export * from "./platform";

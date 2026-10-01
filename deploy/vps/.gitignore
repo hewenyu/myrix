@@ -1,0 +1,18 @@
+# 由 init.mjs 生成的私有配置与一次性 SQL：绝不提交。
+.env
+secrets/
+# Keycloak 私密配置与 realm 导入（含 bootstrap admin 与库口令）。
+auth/keycloak.env
+auth/realm-myrix.json
+# 生成的宿主 Nginx 片段是可公开的，但它含真实域名；保留在本地便于对照。
+auth/nginx-myrix.conf
+# 生成到 sql/ 的一次性 SQL（provision.sh / grants.sh 是受版本控制的静态脚本）。
+sql/00_roles.sql
+sql/05_keycloak_db.sql
+sql/10_grants.sql
+sql/20_cell_credentials.sql
+sql/30_identity.sql
+# 备份与运行数据。
+data/
+backups/
+*.log

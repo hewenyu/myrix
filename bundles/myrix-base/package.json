@@ -1,0 +1,27 @@
+{
+  "name": "@myrix/dsh-bundle-myrix-base",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Myrix 平台底座 bundle：DSH 核心白名单，不叠加 dsh-base，不含 shell / fs / web / jobs / goal / subagent",
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "cordis.patch.yml",
+    "lib/types/**/*.d.ts"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

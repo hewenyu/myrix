@@ -1,0 +1,28 @@
+# Copyright 2026 The Myrix Authors
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v2
+name: myrix
+description: |
+  Myrix platform chart: TenantCell CRD, the Go Cell Manager (controller-runtime)
+  and the Runtime namespace security baseline (default-deny NetworkPolicy,
+  per-tenant workloads). SaaS and private deployments use the same chart with
+  different values.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - myrix
+  - dsh
+  - tenant
+  - cell
+home: https://example.invalid/myrix
+sources:
+  - https://example.invalid/myrix
+maintainers:
+  - name: Myrix platform team
+annotations:
+  # The CRD is installed from templates/crds and is deliberately *not*
+  # upgraded automatically: changing a cell lifecycle contract is an explicit
+  # operator action. `helm upgrade` skips files under crds/.
+  myrix.io/crd-policy: install-only

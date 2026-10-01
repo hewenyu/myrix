@@ -23,6 +23,7 @@ Myrix 是"基于 DSH 的企业治理面"。**不要修改 `vendor/deepseek-harne
 3. 新增判定/授权行为必须同时给出：实现、单测、以及"为什么开/关"的可读原因字符串。
 4. 涉及身份、授权、审计的改动，必须同步更新 `docs/adr/` 或在 PR 中说明为何不更新。
 5. 类型检查与测试是准入条件：`pnpm typecheck && pnpm test`。
+6. **本项目禁止 `chat/completions` 协议**：Cell、模型网关、上游调用、开发装配和验收不得使用该协议，不得保留兼容入口、隐式转换或失败回退。模型链路使用 OpenAI Responses（或显式实现并验证的 Messages）；必须有拒绝旧协议的回归测试。只读 vendor 中的上游实现与负例测试不属于启用该协议。
 
 ## 许可
 
@@ -35,7 +36,11 @@ Myrix 是"基于 DSH 的企业治理面"。**不要修改 `vendor/deepseek-harne
 
 ```bash
 pnpm bootstrap         # 子模块 + 依赖 + 类型检查 + 测试
-pnpm dev               # 启动控制面与管理后台
+pnpm setup:dev         # 显式初始化专用本地 PostgreSQL（需要迁移连接）
+pnpm build:web         # 构建小说工作台
+pnpm dev               # 启动持久化 BFF/works、模型网关与两个隔离 Cell
+pnpm dev:legacy        # 历史治理演示（不要与 dev 同时运行）
+pnpm test:browser      # 验收已启动的真实本地工作台
 pnpm demo:decide       # 判定演示
 pnpm render:profile u_1001 --out <dir>
 pnpm typecheck

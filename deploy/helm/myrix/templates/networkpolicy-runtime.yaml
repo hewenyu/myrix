@@ -1,0 +1,104 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+Zone: the Runtime namespace (one Pod = one DSH process = one tenant).
+
+Default deny in both directions. The openings below are the complete list:
+  * ingress on the driver port, from the BFF/router namespace only;
+  * egress to the model gateway;
+  * egress to the works service;
+  * egress to cluster DNS.
+
+Cell-to-cell traffic is not excluded by a rule; it is simply absent, so the
+default deny covers it. A cell cannot reach another tenant's cell, the
+Kubernetes API server, or the internet.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-cells-default-deny" (include "myrix.fullname" .) }}
+  namespace: {{ include "myrix.runtime.namespace" . }}
+  labels:
+    {{- include "myrix.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime
+  annotations:
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Every cell pod in the runtime namespace is covered, including cells that
+  # do not exist yet: a new tenant inherits the deny by default.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-cells-allow-bff-ingress" (include "myrix.fullname" .) }}
+  namespace: {{ include "myrix.runtime.namespace" . }}
+  labels:
+    {{- include "myrix.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # The session router is the only ingress path to a cell. Named ports keep
+    # this rule working if the numeric driver port is ever changed per cell.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.runtime.bff.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.cellDefaults.driverPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-cells-allow-egress" (include "myrix.fullname" .) }}
+  namespace: {{ include "myrix.runtime.namespace" . }}
+  labels:
+    {{- include "myrix.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS: without it every outbound hostname fails, which looks like
+    # a dead cell rather than a policy problem.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.runtime.dns.namespace | quote }}
+      ports:
+        - protocol: UDP
+          port: {{ .Values.networkPolicy.runtime.dns.port }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.runtime.dns.port }}
+    # Model gateway: every model call goes through the platform gateway, which
+    # does quota, attribution and content policy. The cell never holds an
+    # upstream provider key.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.runtime.gateway.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.runtime.gateway.port }}
+    # Works service: novels, chapters, bible. It re-authorises every call and
+    # checks that the credential's tenant equals the actor's tenant.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.runtime.works.namespace | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.runtime.works.port }}
+{{- end }}

@@ -1,0 +1,71 @@
+{{/* Copyright 2026 The Myrix Authors */}}
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
+{{- include "myrix.validate" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-cell-manager" (include "myrix.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+  {{- if .Values.cellManager.service.annotations }}
+  annotations:
+    {{- toYaml .Values.cellManager.service.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.cellManager.service.type }}
+  selector:
+    {{- include "myrix.cellManager.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.cellManager.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+    {{- if .Values.cellManager.internal.enabled }}
+    - name: internal
+      port: {{ .Values.cellManager.internal.port }}
+      targetPort: internal
+      protocol: TCP
+    {{- end }}
+{{- if .Values.cellManager.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ printf "%s-cell-manager" (include "myrix.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.cellManager.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "myrix.cellManager.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- if and .Values.cellManager.internal.enabled .Values.cellManager.tls.enabled .Values.cellManager.tls.certManager.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ printf "%s-internal" (include "myrix.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "myrix.cellManager.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "myrix.cellManager.tlsSecretName" . }}
+  duration: {{ .Values.cellManager.tls.certManager.duration }}
+  renewBefore: {{ .Values.cellManager.tls.certManager.renewBefore }}
+  issuerRef:
+    name: {{ .Values.cellManager.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.cellManager.tls.certManager.issuerRef.kind }}
+    group: {{ .Values.cellManager.tls.certManager.issuerRef.group }}
+  dnsNames:
+    {{- if .Values.cellManager.tls.certManager.dnsNames }}
+    {{- toYaml .Values.cellManager.tls.certManager.dnsNames | nindent 4 }}
+    {{- else }}
+    - {{ printf "%s-cell-manager.%s.svc" (include "myrix.fullname" .) .Release.Namespace }}
+    - {{ printf "%s-cell-manager.%s.svc.cluster.local" (include "myrix.fullname" .) .Release.Namespace }}
+    {{- end }}
+  usages:
+    - server auth
+{{- end }}

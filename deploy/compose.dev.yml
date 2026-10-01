@@ -1,0 +1,21 @@
+# Local development only. Never publish the database or reuse these credentials.
+# Uses a dedicated project/port; does not modify other local PostgreSQL containers.
+name: myrix-v1-dev
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: myrix_migrator
+      POSTGRES_PASSWORD: myrix_local_migrator
+      POSTGRES_DB: myrix
+    ports:
+      - "127.0.0.1:55439:5432"
+    volumes:
+      - myrix-v1-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myrix_migrator -d myrix"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  myrix-v1-pgdata:

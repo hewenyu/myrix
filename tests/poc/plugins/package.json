@@ -1,0 +1,16 @@
+{
+  "name": "@myrix/poc-plugins",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Myrix Phase0 P1/P2 PoC 的测试专用 DSH 插件（不发布、不属于 myrix-base）",
+  "type": "module",
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    }
+  }
+}
