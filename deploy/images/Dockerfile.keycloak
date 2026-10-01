@@ -1,11 +1,20 @@
 # Copyright 2026 The Myrix Authors
 # SPDX-License-Identifier: Apache-2.0
-# Pre-build the PostgreSQL/health configuration so the VPS never rebuilds Keycloak
-# at startup. No realm, domain, database password or login credential is baked in.
+# Pre-build the PostgreSQL/health/metrics configuration so the VPS never rebuilds
+# Keycloak at startup. No realm, domain, database password or login credential is baked in.
 # The upstream multi-architecture distribution and its license notices are kept.
+#
+# KC_METRICS_ENABLED=false is a BUILD-TIME option and must be persisted by `kc.sh build`.
+# Keycloak 26.8 `start --optimized` aborts with
+#   "The following build time options have values that differ from what is persisted
+#    - the new values will NOT be used until another build is run: kc.metrics-enabled"
+# when the generated runtime env (deploy/auth/auth-config.ts keycloakPublicEnv) sets
+# KC_METRICS_ENABLED=false but the image build never persisted it. Keeping metrics
+# explicitly disabled here (never true) matches the runtime value without a startup rebuild.
 FROM quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc AS keycloak
 ENV KC_DB=postgres \
     KC_HEALTH_ENABLED=true \
+    KC_METRICS_ENABLED=false \
     KC_HTTP_RELATIVE_PATH=/auth \
     KC_HTTP_MANAGEMENT_RELATIVE_PATH=/
 RUN /opt/keycloak/bin/kc.sh build
