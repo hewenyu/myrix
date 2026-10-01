@@ -98,8 +98,20 @@ ON CONFLICT (issuer, subject) DO NOTHING;
 
 - Keycloak 镜像由 Lead 的 `deploy/images/Dockerfile.keycloak` 构建，**只在 GitHub Actions 里**执行
   `kc.sh build`；镜像以 `quay.io/keycloak/keycloak:26.8.0` 的固定 digest 为底，
-  预置 `KC_DB=postgres`、`KC_HEALTH_ENABLED=true`、`KC_HTTP_RELATIVE_PATH=/auth`，
+  预置 `KC_DB=postgres`、`KC_HEALTH_ENABLED=true`、`KC_METRICS_ENABLED=false`、
+  `KC_HTTP_RELATIVE_PATH=/auth`、`KC_HTTP_MANAGEMENT_RELATIVE_PATH=/`，
   默认 `CMD start --optimized --import-realm`。
+- **build-time 与 runtime 必须逐字节一致**：`KC_METRICS_ENABLED` 与 `KC_HEALTH_ENABLED` 都是
+  build-time 选项，会被 `kc.sh build` 持久化进优化镜像。`start --optimized` 启动时会比对运行期
+  环境与镜像里持久化的值，只要有一项不同就直接退出（VPS 上表现为容器 `exit 2` 反复重启，
+  且唯一日志就是
+  `The following build time options have values that differ from what is persisted ... kc.metrics-enabled`）。
+  本目录的 `keycloakPublicEnv` 显式给出 `KC_METRICS_ENABLED=false`，因此镜像也**必须**在
+  `kc.sh build` 之前预置同一个 `false`：既不能省略（省略即"未持久化"，与运行期的 `false` 不一致），
+  也不能改成 `true`（那会打开此前关闭的 metrics）。回归测试
+  `tests/containers/keycloak-image.test.mjs` 同时比对 Dockerfile 的显式 build-time 值与工厂生成
+  的运行期默认值，缺任一侧的 `false` 都会失败。修复路径是提交源码 → PR → CI → 合并 master →
+  用 GitHub Actions 重新发布四个镜像，**不是**在 VPS 上 `kc.sh build` 或在运行期打开 metrics。
 - 发布引用是 `docker.io/hewenyulucky/myrix:keycloak-sha-<40hex>`（或 digest）。
   bff / gateway / cell 来自同一仓库、各 component 前缀。工厂接受这种 immutable 生产镜像，
   **不要求**镜像名形如 `keycloak:<semver>`。
@@ -363,6 +375,12 @@ stdout/stderr 在任何路径都**不泄露** secret 值。
 测试**不**打印 secret、**不**读取真实 `.env` 或进程里的真实秘密（CLI 用显式假环境）、
 **不**写仓库内文件、**不**拉镜像、**不**启动服务、**不**做真实域名或证书操作，
 也不要求 `docker` / `nginx` 可执行文件存在。
+
+另有一条镜像回归在 `tests/containers/keycloak-image.test.mjs`（CI 的
+`node --test tests/containers/*.test.mjs` 一并跑）：它解析 `deploy/images/Dockerfile.keycloak`
+在 `kc.sh build` 之前的 `ENV` 块，与该工厂 `keycloakPublicEnv` 生成的运行期默认值逐项比对
+`KC_DB` / `KC_HEALTH_ENABLED` / `KC_METRICS_ENABLED`，缺任一侧的显式 `false` 即失败
+（对应第 2 节的 `start --optimized` 启动失败）。
 
 ## 12. 明确的非目标
 
