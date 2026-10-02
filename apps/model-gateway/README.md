@@ -62,12 +62,14 @@ curl -N http://127.0.0.1:8790/v1/responses \
 | `MYRIX_GATEWAY_HOST` / `MYRIX_GATEWAY_PORT` | `127.0.0.1` / `8790` | 监听地址 |
 | `MYRIX_GATEWAY_MAX_BODY_BYTES` | `1000000` | HTTP 正文上限 |
 | `MYRIX_GATEWAY_MAX_OUTPUT_TOKENS` | `8192` | 输出硬上限，超出 400 |
-| `MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS` | `1024` | 请求缺省输出预算 |
+| `MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS` | `min(8192, 硬上限)` | 请求缺省输出预算；未显式配置时取 `min(8192, MYRIX_GATEWAY_MAX_OUTPUT_TOKENS)`，硬上限调低则跟随、调高不放大 |
 | `MYRIX_GATEWAY_UPSTREAM_TIMEOUT_MS` | `120000` | 包括流式响应全程的上游截止时间 |
 | `MYRIX_GATEWAY_REVOKE_POLL_MS` | `5000` | 流式期间重新检查当前授权 |
 | `MYRIX_GATEWAY_LOG` | 不启用 | `1` 打开 Fastify 日志，不输出正文/凭据 |
 
 输入预算按 UTF-8 字节及结构字段估算，包含 `instructions`、`tools` 与 `input` 项的 JSON 成本；这不是精确 tokenizer，也不构成所有模型上的严格 token 上界。超硬限拒绝，不把估算截小后放行。
+
+缺省输出预算取 `min(8192, MYRIX_GATEWAY_MAX_OUTPUT_TOKENS)`，而不是人为的小数字：旧的 `1024` 默认会被一个典型推理回合的 reasoning 吃光，上游以 `incomplete(reason=length)` 收尾（[ADR-0031](../../docs/adr/0031-output-budget-and-turn-outcomes.md)）。预占 = 输入估算 + 输出预算，因此默认抬高会同步抬高每请求预占；窗口较紧的部署应显式配小该变量，或让调用方显式传 `max_output_tokens`。
 
 结算只认 Responses 的 `usage.input_tokens` / `usage.output_tokens`，映射到既有账本的 prompt/completion 字段，`total_tokens` 取"上游声明值"与两者之和的较大者。`input_tokens_details.cached_tokens` 与 `output_tokens_details.reasoning_tokens` **只作审计元数据**（已含在 input/output 内，不参与扣减）。真实用量完整入账，允许超过预占；未知断流保留预占。升级必须执行新增的 `0001_honest_settlement` 迁移。
 

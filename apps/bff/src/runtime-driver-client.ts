@@ -265,12 +265,29 @@ export function createDriverHttpClient(options: DriverHttpClientOptions = {}): D
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
 
-  /** 建立"调用方 signal + 截止时间"合并后的信号；返回 dispose 清理定时器。 */
-  function withDeadline(request: DriverRequestOptions): { signal: AbortSignal; dispose: () => void; fired: () => "timeout" | "aborted" | undefined } {
+  /**
+   * 建立"调用方 signal + 截止时间"合并后的信号。
+   *
+   * * `established()`：**只**停掉截止时间定时器（响应头已经到达 = 建立阶段结束），
+   *   但**保留**调用方 signal 的桥接 —— 流可能在响应头之后还要存活任意长时间，
+   *   撤权 / 浏览器断开 / 进程关闭必须能继续中止它。
+   * * `dispose()`：流真正结束（自然收尾 / 取消 / 出错）后一次性清理：停定时器 +
+   *   移除调用方 signal 监听；幂等。
+   * * 先到先得：`aborted` 与 `timeout` 谁先触发就登记谁，之后不再被后者覆盖，
+   *   分类因此是确定的（fail-closed）。
+   */
+  function withDeadline(request: DriverRequestOptions): {
+    signal: AbortSignal;
+    /** 建立阶段（收到有效响应头）结束：停掉截止定时器，保留调用方 signal 桥接。 */
+    established: () => void;
+    dispose: () => void;
+    fired: () => "timeout" | "aborted" | undefined;
+  } {
     const controller = new AbortController();
     let fired: "timeout" | "aborted" | undefined;
+    let disposed = false;
     const onAbort = (): void => {
-      fired = "aborted";
+      if (fired === undefined) fired = "aborted";
       controller.abort(new AbortError("aborted"));
     };
     if (request.signal) {
@@ -281,16 +298,25 @@ export function createDriverHttpClient(options: DriverHttpClientOptions = {}): D
         request.signal.addEventListener("abort", onAbort, { once: true });
       }
     }
-    const timer = setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+      timer = undefined;
       if (fired === undefined) fired = "timeout";
       controller.abort(new AbortError("timeout"));
     }, request.timeoutMs ?? deadlineMs);
     timer.unref?.();
+    const clearTimer = (): void => {
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timer = undefined;
+    };
     return {
       signal: controller.signal,
       fired: () => fired,
+      established: clearTimer,
       dispose: () => {
-        clearTimeout(timer);
+        if (disposed) return;
+        disposed = true;
+        clearTimer();
         request.signal?.removeEventListener("abort", onAbort);
       },
     };
@@ -448,28 +474,103 @@ export function createDriverHttpClient(options: DriverHttpClientOptions = {}): D
           handle.dispose();
           return httpFailure(response.status, payload);
         }
+        // fetch 可能在其内部已被 abort 之后才解析出这个响应（建立截止时间或父级 signal
+        // 与响应解析竞速）。此时绝不能把它当成"建立成功"返回：deadline 已经失效，
+        // 交付出去的流只会立刻结束，调用方却会把它当成一条正常的流（fail-closed）。
+        if (handle.fired() !== undefined) {
+          await cancelBody(response);
+          handle.dispose();
+          return abortOutcome(handle);
+        }
         if (!response.body) {
           handle.dispose();
           return failure("malformed", "driver 事件流没有响应体", { retryable: false });
         }
-        // 事件流本身通常不允许超时（会话可能长时间没有输出）；窄化处理：
-        // 截止时间只覆盖"建立连接 + 收到首个响应头"，读到响应头后就不再用 deadline。
-        // 调用方通过自己的 signal 控制生命周期（撤权 / 浏览器断开 / 进程关闭）。
+        // 截止时间只覆盖"建立连接 + 收到有效响应头"：一旦拿到**有效**响应头就停掉定时器，
+        // 会话空闲多久都不会因为建立阶段的 deadline 被掐断（这是之前的真实缺陷：
+        // 定时器在响应头之后仍然armed，10s 后 abort，projectStream 只能报 stream-interrupted）。
+        // 调用方 signal 的桥接**必须保留**：撤权 / 浏览器断开 / 进程关闭要能中止整条流。
+        handle.established();
         const body = response.body;
+        const cancelable = new AbortController();
+        // 把"取消"信号交给 sseFrames：读循环常常正阻塞在 `reader.read()` 上（会话空闲），
+        // 生成器自身的 finally 要等这次读收敛才会执行。只有持有锁的 reader 自己
+        // `cancel()` 才能让挂起的读取立刻结束（此时 `body.cancel()` 会因 locked 而失败），
+        // 因此由 sseFrames 在收到该信号时负责取消并释放连接。
         const iterable = sseFrames(body, maxFrameBytes, () => {
           if (handle.fired() === "aborted") return true;
           return request.signal?.aborted === true;
-        });
+        }, cancelable.signal);
+        /**
+         * 幂等的流级取消：让挂起的读立即结束，并真正释放上游连接。
+         *
+         * 异步生成器是**惰性**的：在第一次 `next()` 之前它的函数体从未运行，
+         * 既没有 reader，也不会响应 `cancelable`（`onCancel` 还没注册）。所以这里必须
+         * 自己取消**尚未加锁**的 body；否则 `return()` 会返回 `done`，但 HTTP 响应体与
+         * 连接会永远挂着（建立阶段的 deadline 已被 `established()` 停掉，没有第二个
+         * 东西会来收尾）。生成器一旦启动，body 已被它的 reader 锁定，`body.cancel()`
+         * 会因 locked 而无效，取消改由 `sseFrames.onCancel` 的 `reader.cancel()` 负责。
+         */
+        let generatorStarted = false;
+        const cancelStream = (): void => {
+          if (cancelable.signal.aborted) return;
+          cancelable.abort();
+          if (!generatorStarted) void body.cancel().catch(() => undefined);
+        };
+        /** 所有资源**恰好一次**释放：停定时器/摘掉调用方 signal 桥接、取消上游、断读循环。 */
+        let disposed = false;
+        const disposeStream = (): void => {
+          if (disposed) return;
+          disposed = true;
+          handle.signal.removeEventListener("abort", cancelStream);
+          handle.dispose();
+          cancelStream();
+        };
+        // 这里只桥接**响应头到达之后**的 abort（撤权/浏览器断开/进程关闭），流的建立结果
+        // 已经确定：按 ADR-0032 §5，流阶段的 abort 只结束迭代，不把已成功的 `ok` 改写成失败。
+        // 建立阶段的失败（fetch 因超时/父级 abort 而拒绝，或在上面的 `fired` 检查里被判定）
+        // 在此之前就已经返回，不会走到这个监听器。
+        handle.signal.addEventListener("abort", cancelStream, { once: true });
+        if (handle.signal.aborted) cancelStream();
+        const iterator = iterable[Symbol.asyncIterator]();
         return {
           ok: true,
           value: {
-            async *[Symbol.asyncIterator](): AsyncGenerator<DriverSseFrame> {
-              try {
-                yield* iterable;
-              } finally {
-                handle.dispose();
-                await body.cancel().catch(() => undefined);
-              }
+            [Symbol.asyncIterator](): AsyncIterator<DriverSseFrame> {
+              return {
+                async next(): Promise<IteratorResult<DriverSseFrame>> {
+                  generatorStarted = true;
+                  try {
+                    const result = await iterator.next();
+                    if (result.done === true) disposeStream();
+                    return result;
+                  } catch (error) {
+                    disposeStream();
+                    throw error;
+                  }
+                },
+                async return(value?: unknown): Promise<IteratorResult<DriverSseFrame>> {
+                  // 先**同步**取消（未启动时取消 body，已启动时取消 reader，挂起的 read 会
+                  // 以 done 结束），再让生成器收尾：否则空闲会话上的 `return()` 会一直挂
+                  // 在那个永不落定的 read 上。
+                  disposeStream();
+                  if (!generatorStarted) return { done: true, value: undefined };
+                  try {
+                    return await iterator.return(value as never);
+                  } catch {
+                    return { done: true, value: undefined };
+                  }
+                },
+                async throw(error?: unknown): Promise<IteratorResult<DriverSseFrame>> {
+                  // 与 return() 对称：未启动时生成器的函数体不会运行（throw 直接以该错误
+                  // 拒绝，finally 也不会执行），因此必须先在这里取消尚未加锁的 body；
+                  // 已启动时交由 sseFrames 的 reader.cancel() 收尾。
+                  disposeStream();
+                  if (!generatorStarted) throw error;
+                  generatorStarted = true;
+                  return await iterator.throw(error as never);
+                },
+              };
             },
           },
         };
@@ -530,11 +631,17 @@ export function createDriverHttpClient(options: DriverHttpClientOptions = {}): D
  * 绝不无限累积。任何提前退出（超限抛错 / `isAborted()` / 调用方 `return()`）都在
  * finally 里 **cancel** reader，而不是只 `releaseLock()` —— 后者会留下一个没人读的
  * 上游连接继续接收数据。
+ *
+ * `cancelSignal`（可选）：一旦 abort，**同步** `reader.cancel()` 并停止解码。
+ * 生成器运行在异步函数里，调用方 `return()` 时挂起的 `reader.read()` 不会自己落定；
+ * 由外部信号驱动取消后，`return()` 也就在 cancel 处理完成时收敛，而不是无限等待。
+ * 取消导致的 `reader.read()` 拒绝同样按"结束"处理并走 finally 的清理路径。
  */
 export async function* sseFrames(
   body: ReadableStream<Uint8Array>,
   maxFrameBytes: number,
   isAborted: () => boolean,
+  cancelSignal?: AbortSignal,
 ): AsyncGenerator<DriverSseFrame> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -544,6 +651,26 @@ export async function* sseFrames(
   let data: string[] = [];
   let size = 0;
   let completed = false;
+  let canceled = false;
+  const onCancel = (): void => {
+    if (canceled) return;
+    canceled = true;
+    // 关键：reader 已由本函数持有锁，此时 `body.cancel()` 会因 locked 而**拒绝**（无效）。
+    // 只有 reader.cancel() 能立即让挂起的 read() 以 done 结束，从而让生成器收尾、
+    // 让调用方的 `return()` 收敛，并真正释放上游连接。
+    void reader.cancel().catch(() => undefined);
+  };
+
+  /** 读取一块；取消后立即按 EOF 结束（也容忍取消引发的读取拒绝）。 */
+  const readChunk = async (): Promise<{ done: boolean; value?: Uint8Array }> => {
+    if (canceled) return { done: true, value: undefined };
+    try {
+      return await reader.read();
+    } catch (error) {
+      if (canceled) return { done: true, value: undefined };
+      throw error;
+    }
+  };
 
   const frame = (): DriverSseFrame | undefined => {
     if (data.length === 0 && event === "" && id === undefined) return undefined;
@@ -573,8 +700,13 @@ export async function* sseFrames(
   };
 
   try {
+    if (cancelSignal) {
+      cancelSignal.addEventListener("abort", onCancel, { once: true });
+      if (cancelSignal.aborted) onCancel();
+    }
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readChunk();
+      if (canceled) break;
       if (done) {
         completed = true;
         break;
@@ -589,7 +721,11 @@ export async function* sseFrames(
         if (line.endsWith("\r")) line = line.slice(0, -1);
         if (line.length === 0) {
           const parsedFrame = frame();
-          if (parsedFrame !== undefined) yield parsedFrame;
+          if (parsedFrame !== undefined) {
+            yield parsedFrame;
+            // 取消可能发生在 `yield` 挂起期间：恢复后立刻收尾，不再交付缓冲里的后续帧。
+            if (canceled) return;
+          }
           continue;
         }
         if (line.startsWith(":")) continue;
@@ -614,9 +750,11 @@ export async function* sseFrames(
         // retry / 未知字段：忽略（不影响事件语义）。
       }
     }
-    const tail = frame();
+    // 取消发生时不再交付尾部帧（读循环是被外部打断的，不是自然 EOF）。
+    const tail = canceled ? undefined : frame();
     if (tail !== undefined) yield tail;
   } finally {
+    cancelSignal?.removeEventListener("abort", onCancel);
     buffer = "";
     data = [];
     if (!completed) {

@@ -49,12 +49,25 @@ export interface GatewayConfigOverrides {
   limits?: Partial<GatewayLimits>;
 }
 
+/**
+ * 未显式配置 `MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS`（env 与 `overrides.limits` 都没给）时的
+ * **隐式**输出预算，也是它的上限：`min(该值, 生效硬上限)`。决策与事故背景见
+ * `docs/adr/0031-output-budget-and-turn-outcomes.md`；这里只记契约：
+ *
+ * * 隐式默认**只被生效硬上限收窄、不会被它抬高**（硬上限调高时默认仍是 8192）；
+ * * 生效硬上限 = `overrides.limits.maxOutputTokens ?? MYRIX_GATEWAY_MAX_OUTPUT_TOKENS`，
+ *   即 override 优先，隐式默认必须在这上面推导；
+ * * 显式默认（override 或 env）原样生效并优先于隐式默认；显式默认大于生效硬上限仍然
+ *   拒绝（fail-closed），不静默压低；本值不是"无限预算"，请求值恒被硬上限校验。
+ */
+export const PRACTICAL_DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+
 export const DEFAULT_LIMITS: GatewayLimits = {
   maxBodyBytes: 1_000_000,
   maxInputItems: 200,
   maxInputChars: 100_000,
   maxOutputTokens: 8192,
-  defaultMaxOutputTokens: 1024,
+  defaultMaxOutputTokens: PRACTICAL_DEFAULT_MAX_OUTPUT_TOKENS,
   upstreamTimeoutMs: 120_000,
   revokePollMs: 5_000,
   maxSseEventBytes: 1024 * 1024,
@@ -67,6 +80,12 @@ function parsePositiveInt(raw: string | undefined, name: string, fallback: numbe
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} 必须是正整数，收到 ${JSON.stringify(raw)}`);
   return value;
+}
+
+/** 与 {@link parsePositiveInt} 同样的校验，但"未配置"返回 `undefined` 而不是回退默认值。 */
+function parseOptionalPositiveInt(raw: string | undefined, name: string): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  return parsePositiveInt(raw, name, DEFAULT_LIMITS.maxOutputTokens);
 }
 
 /**
@@ -125,11 +144,29 @@ export function resolveGatewayConfig(
     throw new Error("MYRIX_GATEWAY_MODEL_ALLOWLIST 必须包含 MYRIX_GATEWAY_UPSTREAM_MODEL");
   }
 
+  const envMaxOutputTokens = parsePositiveInt(
+    env.MYRIX_GATEWAY_MAX_OUTPUT_TOKENS,
+    "MYRIX_GATEWAY_MAX_OUTPUT_TOKENS",
+    DEFAULT_LIMITS.maxOutputTokens,
+  );
+  // 隐式默认必须在**生效**的硬上限上推导（override 优先于 env），否则 override 把硬上限
+  // 调低时，先按 env 硬上限算出的 8192 默认值会与 override 硬上限冲突并被误判为非法配置。
+  const effectiveMaxOutputTokens = overrides.limits?.maxOutputTokens ?? envMaxOutputTokens;
+  const explicitDefault = parseOptionalPositiveInt(
+    env.MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS,
+    "MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS",
+  );
+  // 默认值优先级：override 显式默认 > env 显式默认 > 隐式默认 min(8192, 生效硬上限)。
+  // 显式默认值大于生效硬上限仍然拒绝（fail-closed），不会被静默压低成硬上限。
+  const defaultMaxOutputTokens = overrides.limits?.defaultMaxOutputTokens
+    ?? explicitDefault
+    ?? Math.min(PRACTICAL_DEFAULT_MAX_OUTPUT_TOKENS, effectiveMaxOutputTokens);
+
   const limits: GatewayLimits = {
     ...DEFAULT_LIMITS,
     maxBodyBytes: parsePositiveInt(env.MYRIX_GATEWAY_MAX_BODY_BYTES, "MYRIX_GATEWAY_MAX_BODY_BYTES", DEFAULT_LIMITS.maxBodyBytes),
-    maxOutputTokens: parsePositiveInt(env.MYRIX_GATEWAY_MAX_OUTPUT_TOKENS, "MYRIX_GATEWAY_MAX_OUTPUT_TOKENS", DEFAULT_LIMITS.maxOutputTokens),
-    defaultMaxOutputTokens: parsePositiveInt(env.MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS, "MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS", DEFAULT_LIMITS.defaultMaxOutputTokens),
+    maxOutputTokens: envMaxOutputTokens,
+    defaultMaxOutputTokens,
     upstreamTimeoutMs: parsePositiveInt(env.MYRIX_GATEWAY_UPSTREAM_TIMEOUT_MS, "MYRIX_GATEWAY_UPSTREAM_TIMEOUT_MS", DEFAULT_LIMITS.upstreamTimeoutMs),
     revokePollMs: parsePositiveInt(env.MYRIX_GATEWAY_REVOKE_POLL_MS, "MYRIX_GATEWAY_REVOKE_POLL_MS", DEFAULT_LIMITS.revokePollMs),
     ...overrides.limits,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_LIMITS, assertUpstreamUrl, resolveGatewayConfig } from "../src/config";
+import { DEFAULT_LIMITS, PRACTICAL_DEFAULT_MAX_OUTPUT_TOKENS, assertUpstreamUrl, resolveGatewayConfig } from "../src/config";
 
 const env = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv => ({
   MYRIX_GATEWAY_UPSTREAM_URL: "https://api.deepseek.example/v1/responses",
@@ -55,8 +55,118 @@ describe("网关配置（没有默认上游 / 没有默认密钥 / 没有默认�
     }
   });
 
-  it("默认输出上限不能超过硬上限", () => {
-    expect(() => resolveGatewayConfig(env({ MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "100" }))).toThrow(/DEFAULT_MAX_OUTPUT_TOKENS/);
+  it("未显式配置默认输出预算时取实用默认（= 硬上限 8192），且被硬上限收窄", () => {
+    // 024c74c9 回归：默认 1024 在带工具调用的真实回合里被推理 token 吃光，
+    // 上游以 incomplete(reason=length) 结束。未显式配置时默认必须回到硬上限。
+    const defaults = resolveGatewayConfig(env());
+    expect(defaults.limits.maxOutputTokens).toBe(8192);
+    expect(defaults.limits.defaultMaxOutputTokens).toBe(8192);
+    expect(defaults.limits.defaultMaxOutputTokens).toBe(PRACTICAL_DEFAULT_MAX_OUTPUT_TOKENS);
+    expect(DEFAULT_LIMITS.defaultMaxOutputTokens).toBe(8192);
+
+    // 只调低硬上限：隐式默认随硬上限一起收窄（不会留下一个超过硬上限的默认值）。
+    const lowHard = resolveGatewayConfig(env({ MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "100" }));
+    expect(lowHard.limits.maxOutputTokens).toBe(100);
+    expect(lowHard.limits.defaultMaxOutputTokens).toBe(100);
+
+    // 硬上限调**高**时隐式默认**不跟随**：仍是 8192，不会随硬上限一起放大。
+    const highHard = resolveGatewayConfig(env({ MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "16384" }));
+    expect(highHard.limits.maxOutputTokens).toBe(16384);
+    expect(highHard.limits.defaultMaxOutputTokens).toBe(PRACTICAL_DEFAULT_MAX_OUTPUT_TOKENS);
+    expect(highHard.limits.defaultMaxOutputTokens).toBe(8192);
+    expect(highHard.limits.defaultMaxOutputTokens).toBeLessThanOrEqual(highHard.limits.maxOutputTokens);
+  });
+
+  it("overrides.limits 参与生效硬上限：隐式默认取 min(8192, 生效硬上限)，不被 env 硬上限误算", () => {
+    const fixture: NodeJS.ProcessEnv = {
+      MYRIX_GATEWAY_UPSTREAM_URL: "https://fixture.invalid/v1/responses",
+      MYRIX_GATEWAY_UPSTREAM_MODEL: "fixture",
+    };
+
+    // 回归：override 单独把硬上限压到 2048，env 未配置硬上限（隐式 8192）。
+    // 旧实现先按 env 算出隐式默认 8192，再被 override 硬上限 2048 判为非法而抛错。
+    const lowOverride = resolveGatewayConfig(fixture, { limits: { maxOutputTokens: 2048 } });
+    expect(lowOverride.limits.maxOutputTokens).toBe(2048);
+    expect(lowOverride.limits.defaultMaxOutputTokens).toBe(2048);
+
+    // override 把硬上限抬高：隐式默认仍封顶在实用默认 8192，不随之上浮。
+    const highOverride = resolveGatewayConfig(fixture, { limits: { maxOutputTokens: 16_384 } });
+    expect(highOverride.limits.maxOutputTokens).toBe(16_384);
+    expect(highOverride.limits.defaultMaxOutputTokens).toBe(PRACTICAL_DEFAULT_MAX_OUTPUT_TOKENS);
+
+    // 生效硬上限取 override 值：env 调低硬上限不影响 override 的最终语义。
+    const envLowOverrideHigh = resolveGatewayConfig(
+      env({ MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "2048" }),
+      { limits: { maxOutputTokens: 16_384 } },
+    );
+    expect(envLowOverrideHigh.limits.maxOutputTokens).toBe(16_384);
+    expect(envLowOverrideHigh.limits.defaultMaxOutputTokens).toBe(8192);
+
+    // override 显式默认原样生效，且优先于隐式默认（0 < 512 < 生效硬上限 2048）。
+    const explicitOverride = resolveGatewayConfig(fixture, {
+      limits: { maxOutputTokens: 2048, defaultMaxOutputTokens: 512 },
+    });
+    expect(explicitOverride.limits.defaultMaxOutputTokens).toBe(512);
+  });
+
+  it("显式默认与生效硬上限冲突一律拒绝（两个方向），不做静默压低", () => {
+    const fixture: NodeJS.ProcessEnv = {
+      MYRIX_GATEWAY_UPSTREAM_URL: "https://fixture.invalid/v1/responses",
+      MYRIX_GATEWAY_UPSTREAM_MODEL: "fixture",
+    };
+
+    // env 显式默认 4096 + override 硬上限 2048（最终 spread 的硬上限）：拒绝。
+    expect(() => resolveGatewayConfig(
+      env({ MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS: "4096" }),
+      { limits: { maxOutputTokens: 2048 } },
+    )).toThrow(/DEFAULT_MAX_OUTPUT_TOKENS/);
+
+    // 反方向：env 硬上限 2048 + override 显式默认 4096：同样拒绝。
+    expect(() => resolveGatewayConfig(
+      env({ MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "2048" }),
+      { limits: { defaultMaxOutputTokens: 4096 } },
+    )).toThrow(/DEFAULT_MAX_OUTPUT_TOKENS/);
+
+    // override 自身冲突（显式默认 > override 硬上限）也拒绝。
+    expect(() => resolveGatewayConfig(fixture, {
+      limits: { maxOutputTokens: 2048, defaultMaxOutputTokens: 4096 },
+    })).toThrow(/DEFAULT_MAX_OUTPUT_TOKENS/);
+  });
+
+  it("显式配置的默认输出预算原样生效；显式默认大于硬上限仍然拒绝（fail-closed）", () => {
+    // 显式默认照旧生效（不因为"实用默认"而被覆盖）。
+    const explicit = resolveGatewayConfig(env({
+      MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "2048",
+      MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS: "512",
+    }));
+    expect(explicit.limits.defaultMaxOutputTokens).toBe(512);
+
+    // 显式默认可以等于硬上限（边界合法）。
+    expect(resolveGatewayConfig(env({
+      MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "2048",
+      MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS: "2048",
+    })).limits.defaultMaxOutputTokens).toBe(2048);
+
+    // 大于硬上限：显式配置的错误必须报出来，不静默压低成硬上限。
+    expect(() => resolveGatewayConfig(env({
+      MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "100",
+      MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS: "200",
+    }))).toThrow(/DEFAULT_MAX_OUTPUT_TOKENS/);
+    expect(() => resolveGatewayConfig(env({
+      MYRIX_GATEWAY_MAX_OUTPUT_TOKENS: "8192",
+      MYRIX_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS: "9000",
+    }))).toThrow(/DEFAULT_MAX_OUTPUT_TOKENS/);
+  });
+
+  it("部署默认值不会削弱其它额度/输入限制", () => {
+    const config = resolveGatewayConfig(env());
+    // 输入、正文与超时上限完全不变：这次只调整"输出预算"这一项。
+    expect(config.limits.maxInputItems).toBe(DEFAULT_LIMITS.maxInputItems);
+    expect(config.limits.maxInputChars).toBe(DEFAULT_LIMITS.maxInputChars);
+    expect(config.limits.maxBodyBytes).toBe(DEFAULT_LIMITS.maxBodyBytes);
+    expect(config.limits.upstreamTimeoutMs).toBe(DEFAULT_LIMITS.upstreamTimeoutMs);
+    // 输出预算恒被硬上限收窄（不存在"无上限"路径）。
+    expect(config.limits.defaultMaxOutputTokens).toBeLessThanOrEqual(config.limits.maxOutputTokens);
   });
 
   it("开发凭据表只在非生产可用，且要求令牌有足够熵", () => {
