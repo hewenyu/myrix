@@ -14,7 +14,8 @@ import { GatewayError } from "../src/errors";
 
 const limits: RequestValidationLimits = {
   maxOutputTokens: 8192,
-  defaultMaxOutputTokens: 1024,
+  // 与部署默认一致：未显式配置时"实用默认" = 硬上限（024c74c9 回归）。
+  defaultMaxOutputTokens: 8192,
   maxInputItems: 200,
   maxInputChars: 100_000,
 };
@@ -36,8 +37,44 @@ describe("Responses 请求校验（fail-closed）", () => {
     const parsed = parseResponseRequest(base, limits);
     expect(parsed.model).toBe("deepseek-chat");
     expect(parsed.stream).toBe(false);
-    expect(parsed.maxOutputTokens).toBe(1024);
+    expect(parsed.maxOutputTokens).toBe(8192);
     expect(parsed.input).toHaveLength(1);
+  });
+
+  it("未显式给 max_output_tokens 时，恒向上游发默认预算（含 tools 的请求也一样）", () => {
+    // 024c74c9：带工具调用的回合里，默认预算必须真的"写上线"，而不是只存在于本地对象。
+    const withTools = {
+      ...base,
+      input: [
+        { role: "user", content: "先取大纲再检索经文" },
+        { type: "function_call", call_id: "call_1", name: "get_outline", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_1", output: "{\"outline\":\"...\"}" },
+      ],
+      tools: [{ type: "function", name: "search_bible", description: "检索经文", parameters: { type: "object" } }],
+      tool_choice: "auto",
+    };
+    const body = toUpstreamBody(parseResponseRequest(withTools, limits));
+    expect(body.max_output_tokens).toBe(limits.defaultMaxOutputTokens);
+    expect(body.max_output_tokens).toBe(limits.maxOutputTokens);
+    expect(body.tools).toHaveLength(1);
+    expect(body.tool_choice).toBe("auto");
+    // 仍然只发 Responses 字段：没有 chat 形状的残留。
+    expect(body).not.toHaveProperty("messages");
+    expect(body).not.toHaveProperty("max_tokens");
+
+    // 显式值仍然原样透传（默认只在"缺省"时生效）。
+    expect(toUpstreamBody(parseResponseRequest({ ...withTools, max_output_tokens: 4096 }, limits)).max_output_tokens).toBe(4096);
+  });
+
+  it("代表性推理预算（1024）不再被静默截断：预算覆盖推理+正文的输出上限", () => {
+    // 事故里 output=1024 全部被 reasoning 吃掉、正文为空。默认预算必须显著高于
+    // 一个典型推理回合的消耗（这里取 1024 作为代表性推理预算）。
+    const representativeReasoningBudget = 1024;
+    const parsed = parseResponseRequest(base, limits);
+    expect(parsed.maxOutputTokens).toBeGreaterThan(representativeReasoningBudget);
+    // 请求方仍然可以显式收窄（例如只要短回复），不受默认值影响。
+    expect(parseResponseRequest({ ...base, max_output_tokens: representativeReasoningBudget }, limits).maxOutputTokens)
+      .toBe(representativeReasoningBudget);
   });
 
   it("接受字符串 content 与 assistant 的 output_text 历史", () => {

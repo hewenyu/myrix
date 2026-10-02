@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_LIMITS } from "../src/config";
 import { GatewayError } from "../src/errors";
 import { MemoryLedger, systemLedgerClock, type LedgerClock } from "../src/ledger";
-import { parseResponseRequest, type ResponseInputItem } from "../src/protocol";
+import { parseResponseRequest, toUpstreamBody, type ResponseInputItem } from "../src/protocol";
 import {
   computeReservation,
   DEFAULT_BYTES_PER_TOKEN,
@@ -95,6 +95,47 @@ describe("输入估算：UTF-8 字节保守估算（Responses input 项）", () 
   it("outputBudget 受 protocol 硬上限约束", () => {
     expect(outputBudget(parse({ model: "deepseek-chat", input: [{ role: "user", content: "hi" }], max_output_tokens: 4096 }), limits)).toBe(4096);
     expect(outputBudget(parse({ model: "deepseek-chat", input: [{ role: "user", content: "hi" }] }), limits)).toBe(limits.defaultMaxOutputTokens);
+  });
+
+  it("默认预算 = 硬上限时，预占与线上 max_output_tokens 保持一致（含 tools）", () => {
+    // 024c74c9 回归：默认预算提高后，"预占覆盖输出预算"这条不变量必须仍然成立，
+    // 而且预占用的输出额度与真正发往上游的 `max_output_tokens` 是同一个数。
+    const tools = [{ type: "function" as const, name: "get_outline", description: "取大纲", parameters: { type: "object" } }];
+    const request = parse({
+      model: "deepseek-chat",
+      input: [{ role: "user", content: "写一章" }],
+      tools,
+      tool_choice: "auto",
+      stream: true,
+    });
+    const budget = outputBudget(request, limits);
+    expect(budget).toBe(limits.defaultMaxOutputTokens);
+    expect(budget).toBe(limits.maxOutputTokens);
+    expect(toUpstreamBody(request).max_output_tokens).toBe(budget);
+
+    const reserved = computeReservation(request, limits, policy);
+    const inputOnly = estimateRequestTokens(request, { bytesPerToken: policy.bytesPerToken });
+    // 预占 = 输入估算 + 输出预算（不截断、不封顶）。
+    expect(reserved).toBe(Math.max(1, inputOnly + budget));
+    expect(reserved).toBeGreaterThanOrEqual(budget);
+  });
+
+  it("显式收窄输出预算时，预占与线上字段一起收窄（不会仍按默认值预占）", () => {
+    const request = parse({ model: "deepseek-chat", input: [{ role: "user", content: "短回复" }], max_output_tokens: 256 });
+    expect(outputBudget(request, limits)).toBe(256);
+    expect(toUpstreamBody(request).max_output_tokens).toBe(256);
+    expect(computeReservation(request, limits, policy)).toBe(
+      Math.max(1, estimateRequestTokens(request, { bytesPerToken: policy.bytesPerToken }) + 256),
+    );
+  });
+
+  it("硬上限被调低时默认预算随之收窄，预占不会超过硬上限允许的输出", () => {
+    const lowHard = { ...limits, maxOutputTokens: 100, defaultMaxOutputTokens: 100 };
+    const request = parse({ model: "deepseek-chat", input: [{ role: "user", content: "hi" }] }, lowHard);
+    expect(outputBudget(request, lowHard)).toBe(100);
+    expect(toUpstreamBody(request).max_output_tokens).toBe(100);
+    // 超过硬上限的显式请求仍然 400，不静默截断。
+    expect(() => parse({ model: "deepseek-chat", input: [{ role: "user", content: "hi" }], max_output_tokens: 101 }, lowHard)).toThrow(GatewayError);
   });
 });
 
