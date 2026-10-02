@@ -72,6 +72,7 @@ jobs:
           pnpm typecheck
           pnpm test
           node --test tests/ci/*.test.mjs tests/containers/*.test.mjs tests/vps/*.test.mjs tests/auth-deploy/*.test.mjs
+          node --test tests/poc/tests/factory.test.mjs
       - name: Build browser application
         run: pnpm build:web
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6

@@ -109,6 +109,9 @@ const SAFE_MESSAGES = Object.freeze({
   chapter_not_persisted: '刷新前经同源 API 读取章节正文与提交内容不一致',
   chapter_not_visible_after_reload: '刷新页面后章节正文未从服务端恢复',
   session_create_failed: '通过工作台 UI 创建助手会话失败',
+  session_activation_timeout: '创建会话后未在有界时间内观测到 active；拒绝撤销一个未激活的会话',
+  session_activation_invalid: '同源会话列表未包含刚创建的会话 id（或响应不可解析）；拒绝继续',
+  session_already_revoked: '刚创建的会话已是 revoked/closed 状态；拒绝把本次验收标记为通过',
   session_revoke_failed: '撤销助手会话未返回 204；会话可能仍然有效，拒绝把本次验收标记为通过',
   unexpected_model_activity: '未发送任何模型请求，但会话里出现了消息',
   unexpected_error: '浏览器或平台验收失败；原始错误已按策略脱敏（不含 Playwright/网络细节）',
@@ -286,6 +289,88 @@ export function passwordChangeReport(progress) {
 export function assertSessionRevoked(response) {
   if (!response || response.status !== 204) throw new AcceptanceError('session_revoke_failed');
   return true;
+}
+
+/**
+ * 会话激活轮询的有界参数。
+ *
+ * 为什么需要它：`POST /api/v1/works/:workId/sessions` 返回 201 只表示"绑定 + create
+ * 命令已持久入队"（`status: creating`）——真正的激活发生在 create 命令拿到 cell 回执
+ * 之后。旧 runner 在 201 之后立刻 DELETE，撤销的是一个**尚未激活**的会话，
+ * 验收结论与生产语义不符。这里只在**同源已认证**的 `GET .../sessions` 上确认
+ * 精确 created sid 达到 `active` 之后才允许撤销。
+ *
+ * 必须**有界**：一直等不到 active 就超时失败，绝不把"没激活"当成"可以撤销"。
+ */
+export const SESSION_ACTIVATION_TIMEOUT_MS = 30_000;
+export const SESSION_ACTIVATION_POLL_MS = 500;
+
+/** 同源会话列表路径；只接受 UUID 形态的作品 id（防注入/拼接）。 */
+export function sessionsListPath(workId) {
+  if (typeof workId !== 'string' || !UUID.test(workId)) throw new AcceptanceError('session_activation_invalid');
+  return `/api/v1/works/${workId}/sessions`;
+}
+
+/**
+ * 把一次会话列表响应折叠成**精确**结论（纯函数，可离线单测）。
+ *
+ * 判据只有 created sid 自己那一条：
+ *   * `active`   —— 该 id 存在且状态为 `active`（唯一放行结论）；
+ *   * `creating` —— 该 id 存在但仍在创建中（继续有界轮询）；
+ *   * `revoked`  —— 该 id 已是 `revoked`/`closed`（终止失败，绝不"撤销一个已撤销的"）；
+ *   * `unknown`  —— 列表里没有该 id（含"别的会话 active"这种非匹配情况）；
+ *   * `invalid`  —— 响应结构不可解析（终止失败，绝不推断）。
+ *
+ * 刻意**不**把"列表里有任何一条 active"当成通过：必须是自己刚创建的那一条。
+ */
+export function classifySessionActivation(payload, expectedId) {
+  if (typeof expectedId !== 'string' || expectedId.length === 0) return 'invalid';
+  if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) return 'invalid';
+  const match = payload.items.find(item => item && typeof item === 'object' && item.id === expectedId);
+  if (!match) return 'unknown';
+  if (match.status === 'active') return 'active';
+  if (match.status === 'creating') return 'creating';
+  if (match.status === 'revoked' || match.status === 'closed') return 'revoked';
+  return 'invalid';
+}
+
+/**
+ * 有界等待刚创建的会话达到 `active`。
+ *
+ * 依赖全部注入（`fetchList` 返回 `{ status, json() }` 形状的响应、`now`/`sleep` 计时），
+ * 因此可以离线单测；真实调用传同源 `context.request.get`，且必须带 `maxRedirects: 0`。
+ *
+ * 终止语义：
+ *   * `active`                       → 返回 `'active'`；
+ *   * `revoked`                      → 固定 code `session_already_revoked`；
+ *   * `invalid`                      → 固定 code `session_activation_invalid`；
+ *   * 网络失败/**任何非 200**（含 3xx；调用方以 `maxRedirects: 0` 保证重定向不会被
+ *     自动跟随、而是原样暴露成非 200）/`unknown`/`creating` → 继续轮询，超过 deadline
+ *     抛 `session_activation_timeout`。绝不把"没确认"当成通过。
+ */
+export async function waitForSessionActivation(input) {
+  const timeoutMs = input.timeoutMs ?? SESSION_ACTIVATION_TIMEOUT_MS;
+  const pollMs = input.pollMs ?? SESSION_ACTIVATION_POLL_MS;
+  const deadline = input.now() + timeoutMs;
+  for (;;) {
+    let verdict;
+    try {
+      const response = await input.fetchList();
+      if (!response || response.status !== 200) {
+        verdict = 'unknown';
+      } else {
+        verdict = classifySessionActivation(await response.json().catch(() => null), input.expectedId);
+      }
+    } catch {
+      // 网络/解析异常：按"尚未确认"继续有界轮询，绝不在这里下任何放行结论。
+      verdict = 'unknown';
+    }
+    if (verdict === 'active') return 'active';
+    if (verdict === 'revoked') throw new AcceptanceError('session_already_revoked');
+    if (verdict === 'invalid') throw new AcceptanceError('session_activation_invalid');
+    if (input.now() >= deadline) throw new AcceptanceError('session_activation_timeout');
+    await input.sleep(pollMs);
+  }
 }
 
 /** 只取 pathname：绝不让带查询串（可能含 code/state）的 URL 进入任何输出。 */
@@ -500,6 +585,7 @@ export async function main(env = process.env) {
     workId: null,
     chapterId: null,
     sessionId: null,
+    sessionActivation: null,
     sessionRevoked: false,
     passwordChanged: false,
     passwordChangeAttempted: false,
@@ -675,12 +761,32 @@ export async function main(env = process.env) {
     if (sessionCreated.status !== 201 || typeof sessionCreated.body?.id !== 'string' || !UUID.test(sessionCreated.body.id)) {
       throw new AcceptanceError('session_create_failed');
     }
+    // 先捕获 created id：**即使后续激活失败**，报告也必须带上这个已创建的真实 id，
+    // 便于人工按 id 清理，而不是在失败路径上丢掉证据。
     report.sessionId = sessionCreated.body.id;
     await page.getByRole('button', { name: '撤销会话', exact: true }).waitFor();
     if ((await page.locator('[data-testid="chat-log"] .msg').count()) !== 0) {
       throw new AcceptanceError('unexpected_model_activity');
     }
     report.checks.push('Created a durable assistant session through the UI without sending any model request');
+
+    // 201 只代表"绑定 + create 命令已入队"（creating）；真正的激活在 cell 回执之后。
+    // 撤销一个尚未激活的会话在生产语义里毫无意义，因此这里用**同源已认证**的
+    // `GET .../sessions` 有界轮询，确认**刚创建的那一条**达到 active 才允许撤销。
+    // 绝不把"列表里有别的 active 会话"当成通过，也绝不在超时后继续撤销。
+    const activation = await waitForSessionActivation({
+      expectedId: report.sessionId,
+      // `maxRedirects: 0`：激活判定必须 fail-closed —— 301/302/303/307/308 一律按
+      // "非 200 未确认"继续有界轮询，绝不自动跟随重定向（否则一个把已登录请求重定向
+      // 到别处的中间人/反代就能伪造一条 200 的会话列表，且 redirect 目标会带着同源
+      // 认证凭据被请求）。503/401 等非 200 同样不会被当成 active。
+      fetchList: () => context.request.get(`${input.origin}${sessionsListPath(report.workId)}`, { maxRedirects: 0, timeout: 15_000 }),
+      now: () => Date.now(),
+      sleep: (ms) => new Promise(resolve => { setTimeout(resolve, ms); }),
+    });
+    report.sessionActivation = activation;
+    report.checks.push('Polled the same-origin authenticated session list until the exact created session reached active (bounded, no model request)');
+
     const revoked = await withResponse(
       page,
       `/api/v1/sessions/${report.sessionId}`,

@@ -5,6 +5,9 @@
  * * 缺 `baseURL`、缺 cell 令牌、缺模型清单/上下文容量、端点不是 http(s)
  *   或非 loopback 的明文 http → 抛错，插件不激活。
  *   **绝不**退化成"直连上游"、"无鉴权调用"或"猜一个上下文窗口"。
+ * * 唯一例外是 `internalHttpOrigins`：装配方可以逐项声明同机 Docker 服务名 +
+ *   端口的规范 HTTP origin（ADR 0030）。默认空列表 = 关闭；声明项无论是否被
+ *   本次 `baseURL` 用到都全部校验。这不是"明文总开关"。
  * * 端点必须是**网关 origin**（可带 `/v1` 之类的路径前缀），适配器自己追加
  *   `/responses`；写死 `chat/completions` 的旧配置在这里被显式拒绝。
  * * 缺会话归因 / 模型不在清单的请求在运行期拒绝（见 `adapter.ts`）。
@@ -18,6 +21,8 @@ import type { Config, GatewayCellTokenResolver, GatewayRequestRecord } from './t
 export interface ResolvedGatewayConfig {
   /** 网关 origin（可带路径前缀，例如 `https://gw.internal/v1`）。 */
   readonly baseURL: string
+  /** 通过校验的同机内部 HTTP origin 声明（已去重、已规范化）；默认空数组。 */
+  readonly internalHttpOrigins: readonly string[]
   /** 实际请求的 Responses 端点（`baseURL` + `/responses`）。 */
   readonly endpoint: string
   readonly providers: readonly string[]
@@ -47,7 +52,69 @@ export const RESPONSES_PATH = '/responses'
 const DEFAULT_REQUEST_TIMEOUT_MS = 600_000
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+/** `internalHttpOrigins` 的最大声明条数（与容器入口保持一致）。 */
+export const MAX_INTERNAL_HTTP_ORIGINS = 16
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost', '[::1]'])
+/** 单标签 Docker 服务名：小写字母开头，后续小写字母/数字/连字符，最长 63 字符。 */
+const INTERNAL_SERVICE_HOST = /^[a-z][a-z0-9-]{0,62}$/
+
+/**
+ * 校验并规范化一条同机内部 HTTP origin 声明。
+ *
+ * 语义与容器入口 `parseInternalHttpOrigins` 及 `@myrix/binding-lease` 的同名
+ * 校验保持一致：只接受规范 HTTP origin（`url.origin === raw`），主机必须是
+ * 单标签 Docker 服务名；凭据、路径（含结尾 `/`）、查询串、fragment、通配符、
+ * IP、多标签域名、其它协议全部拒绝。错误信息不回显原始值。
+ */
+export function normalizeInternalHttpOrigin(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 512) {
+    throw new Error('myrix-llm-gateway: 配置 internalHttpOrigins 的每一项都必须是非空、不超过 512 字符的字符串')
+  }
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new Error('myrix-llm-gateway: 配置 internalHttpOrigins 的每一项都必须是合法 URL')
+  }
+  if (url.protocol !== 'http:') {
+    throw new Error('myrix-llm-gateway: 配置 internalHttpOrigins 只接受 http: 规范 origin')
+  }
+  if (url.username !== '' || url.password !== '' || url.origin !== raw) {
+    throw new Error(
+      'myrix-llm-gateway: 配置 internalHttpOrigins 的每一项都必须是规范 origin：'
+      + '不得内嵌凭据、路径、查询串或 fragment',
+    )
+  }
+  if (!INTERNAL_SERVICE_HOST.test(url.hostname)) {
+    throw new Error(
+      'myrix-llm-gateway: 配置 internalHttpOrigins 只接受单标签 Docker 服务名主机'
+      + '（不接受通配符、IP 或多标签域名）',
+    )
+  }
+  return url.origin
+}
+
+/**
+ * 校验整个 `internalHttpOrigins` 列表（fail-closed，且未用到的项也校验）。
+ *
+ * @param value - 配置里的原始值；`undefined` 表示关闭（返回空数组）。
+ * @returns 去重后的规范化 origin 列表。
+ */
+export function resolveInternalHttpOrigins(value: unknown): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    throw new Error('myrix-llm-gateway: 配置 internalHttpOrigins 必须是字符串数组')
+  }
+  if (value.length > MAX_INTERNAL_HTTP_ORIGINS) {
+    throw new Error(`myrix-llm-gateway: 配置 internalHttpOrigins 最多 ${MAX_INTERNAL_HTTP_ORIGINS} 项`)
+  }
+  const normalized: string[] = []
+  for (const entry of value) {
+    const origin = normalizeInternalHttpOrigin(entry)
+    if (!normalized.includes(origin)) normalized.push(origin)
+  }
+  return normalized
+}
 
 function nonEmpty(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -62,8 +129,11 @@ function nonEmpty(value: unknown, field: string): string {
  * `baseURL` 是**网关 origin**（例如 `https://gw.acme.example/v1`），适配器追加
  * `/responses`。旧配置里的完整 `…/v1/chat/completions` 会被显式拒绝：本仓库
  * 禁止 chat/completions 协议，不做静默改写。
+ *
+ * 明文 `http:` 只在 loopback，或 `url.origin` 被 `internalHttpOrigins` **逐项
+ * 精确声明**时允许（ADR 0030）；端口不匹配仍然拒绝。
  */
-function resolveEndpoint(raw: unknown): { baseURL: string; endpoint: string } {
+function resolveEndpoint(raw: unknown, internalHttpOrigins: readonly string[]): { baseURL: string; endpoint: string } {
   const value = nonEmpty(raw, 'baseURL')
   let url: URL
   try {
@@ -74,9 +144,11 @@ function resolveEndpoint(raw: unknown): { baseURL: string; endpoint: string } {
   if (url.search.length > 0 || url.hash.length > 0 || url.username.length > 0 || url.password.length > 0) {
     throw new Error('myrix-llm-gateway: 配置 baseURL 不能带凭据、查询串或片段')
   }
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname))) {
+  if (url.protocol !== 'https:'
+    && !(url.protocol === 'http:'
+      && (LOOPBACK_HOSTS.has(url.hostname) || internalHttpOrigins.includes(url.origin)))) {
     throw new Error(
-      'myrix-llm-gateway: 配置 baseURL 必须是 https（仅 loopback 允许 http，用于本地联调）；'
+      'myrix-llm-gateway: 配置 baseURL 必须是 https（仅 loopback 或已声明的同机内部 origin 允许 http）；'
       + 'cell 令牌不能走明文通道',
     )
   }
@@ -148,7 +220,9 @@ export function resolveConfig(
   if (config === null || typeof config !== 'object') {
     throw new Error('myrix-llm-gateway: 缺少插件配置')
   }
-  const { baseURL, endpoint } = resolveEndpoint(config.baseURL)
+  // 先校验整份声明，再解析端点：非法声明不能因为本次没被用到就蒙混过关。
+  const internalHttpOrigins = resolveInternalHttpOrigins(config.internalHttpOrigins)
+  const { baseURL, endpoint } = resolveEndpoint(config.baseURL, internalHttpOrigins)
 
   // 令牌存在性是**启动条件**：没有它就只会在第一次模型调用上失败，
   // 而那时的错误会以"模型不可用"的面貌出现，掩盖真正的部署错误。
@@ -205,6 +279,7 @@ export function resolveConfig(
 
   return {
     baseURL,
+    internalHttpOrigins,
     endpoint,
     providers: resolvedProviders,
     models: new Set(models),

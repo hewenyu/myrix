@@ -28,9 +28,21 @@ export interface Config {
    * 模型网关的 **origin**（可带路径前缀，例如 `https://gw.acme.example/v1`）。
    * 适配器会自己追加 `/responses`，因此**不要**写完整端点，也不要指向
    * `chat/completions`（本仓库禁止该协议，配置成它会启动失败）。只允许
-   * http(s)；非 loopback 的 http 会被拒绝（明文承载 cell 令牌）。
+   * http(s)；非 loopback 的 http 会被拒绝（明文承载 cell 令牌），除非其
+   * origin 被 `internalHttpOrigins` 逐项声明（ADR 0030）。
    */
   baseURL: string
+  /**
+   * 显式声明的**同机内部 HTTP origin** 白名单（ADR 0030）。
+   *
+   * 只用于单机 Docker Compose 部署：容器入口把
+   * `MYRIX_CELL_INTERNAL_HTTP_ORIGINS` 解析出的精确 origin 原样传下来。默认
+   * `[]` = 关闭，此时非回环明文 HTTP 一律拒绝。每一项都必须是规范 HTTP
+   * origin（`http://<单标签服务名>:<端口>`，无凭据/路径/查询/fragment），
+   * 且**全部**校验——包括本次 `baseURL` 没有用到的那几项；通配符、公网域名、
+   * IP、多标签域名、非 HTTP 协议一律拒绝。这不是"明文总开关"。
+   */
+  internalHttpOrigins?: readonly string[]
   /**
    * Cell 服务令牌。可以给字面量（由 `!!js` 从环境读取），也可以由装配方在
    * 加载后调用 `__setCellToken()` 注入。**不要**把令牌写进 cordis.yml。

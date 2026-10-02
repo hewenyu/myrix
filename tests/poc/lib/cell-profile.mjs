@@ -93,6 +93,11 @@ export const CELL_ENV = Object.freeze({
   generation: 'MYRIX_CELL_GENERATION',
   worksOrigin: 'MYRIX_WORKS_ORIGIN',
   gatewayURL: 'MYRIX_GATEWAY_URL',
+  // ADR 0030: the same-host internal HTTP origin declarations the container entry
+  // parses from MYRIX_CELL_INTERNAL_HTTP_ORIGINS. The factory forwards them to
+  // both origin-validating plugins through this one variable; it never re-derives
+  // or widens the list.
+  internalHttpOrigins: 'MYRIX_CELL_INTERNAL_HTTP_ORIGINS',
   providers: 'MYRIX_MODEL_PROVIDERS',
   models: 'MYRIX_MODELS',
   contextWindow: 'MYRIX_CONTEXT_WINDOW',
@@ -167,6 +172,10 @@ export const ROW_HANDLERS = Object.freeze({
     `        cellId: !!js process.env.${CELL_ENV.cellId}`,
     `        tenantId: !!js process.env.${CELL_ENV.tenantId}`,
     `        origin: !!js process.env.${CELL_ENV.worksOrigin}`,
+    // ADR 0030: only the entry-validated same-host declarations reach the plugin.
+    // Unset stays `[]` (fail-closed); a declared list is validated again by the
+    // plugin so a hand-written profile cannot smuggle in an undeclared origin.
+    `        internalHttpOrigins: !!js JSON.parse(process.env.${CELL_ENV.internalHttpOrigins} ?? '[]')`,
     `        token: !!js process.env.${SECRET_ENV.worksToken}`,
     `        ttlMs: !!js Number(process.env.${CELL_ENV.leaseTtlMs} ?? '10000')`,
     `        refreshMs: !!js Number(process.env.${CELL_ENV.leaseRefreshMs} ?? '3000')`,
@@ -200,6 +209,9 @@ export const ROW_HANDLERS = Object.freeze({
     "      name: '@myrix/llm-gateway'",
     '      config:',
     `        baseURL: !!js process.env.${CELL_ENV.gatewayURL}`,
+    // Same allowlist as the binding lease: the entry validated it once, and the
+    // gateway re-validates the exact origins before it will accept plaintext.
+    `        internalHttpOrigins: !!js JSON.parse(process.env.${CELL_ENV.internalHttpOrigins} ?? '[]')`,
     `        cellToken: !!js process.env.${SECRET_ENV.gatewayToken}`,
     `        providers: !!js (process.env.${CELL_ENV.providers} ?? 'myrix-gateway').split(',').filter(Boolean)`,
     `        models: !!js (process.env.${CELL_ENV.models} ?? '').split(',').filter(Boolean)`,
@@ -516,6 +528,28 @@ function linkProfileNodeModules(paths, installNodeModules) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Normalize the caller's `internalHttpOrigins` into the JSON the profile reads.
+ *
+ * A caller that omits the field means `[]` (fail-closed). A caller that supplies
+ * a non-array, or an array with a non-string member, is a configuration bug: the
+ * factory throws rather than silently persisting `[]` or `[null]`, either of
+ * which would make the plugins deny an origin the deployment declared. The
+ * entries themselves are validated by the plugins (`resolveConfig`), which is the
+ * authoritative origin contract; this function only guards the transport shape.
+ *
+ * @param {unknown} value - `options.internalHttpOrigins`.
+ * @returns {readonly string[]} the origin declarations, defaulting to `[]`.
+ * @throws when the value is not a string array.
+ */
+export function cellInternalHttpOrigins(value) {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new Error('myrix-poc: createCellProfile requires "internalHttpOrigins" to be an array of strings')
+  }
+  return [...value]
+}
+
+/**
  * Build one Cell.
  *
  * @param {{
@@ -531,6 +565,7 @@ function linkProfileNodeModules(paths, installNodeModules) {
  *   worksToken: string,
  *   gatewayBaseURL: string,
  *   gatewayToken: string,
+ *   internalHttpOrigins?: readonly string[],
  *   providers?: readonly string[],
  *   models: readonly string[],
  *   contextWindow?: number,
@@ -626,6 +661,11 @@ export function createCellProfile(options) {
     [CELL_ENV.port]: String(options.port),
     [CELL_ENV.worksOrigin]: options.worksOrigin,
     [CELL_ENV.gatewayURL]: options.gatewayBaseURL,
+    // ADR 0030: forward the entry-validated declarations verbatim as JSON. The
+    // factory does not validate or canonicalize them — the plugins do, again, at
+    // load time — but a value that is not a string array is a caller bug and must
+    // not silently become `[]` (which would turn "declared" into "denied").
+    [CELL_ENV.internalHttpOrigins]: JSON.stringify(cellInternalHttpOrigins(options.internalHttpOrigins)),
     [CELL_ENV.providers]: (options.providers ?? ['myrix-gateway']).join(','),
     [CELL_ENV.models]: models.join(','),
     [CELL_ENV.contextWindow]: String(options.contextWindow ?? 100_000),

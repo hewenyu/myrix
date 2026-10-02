@@ -50,6 +50,7 @@ import type { AuthRepository, AuthSession, LoginFlow } from "../src/auth";
 import type { NovelRepository } from "../src/ports";
 import {
   createRuntimeRouter,
+  isRecoveryCarryingOp,
   RUNTIME_SERVICE_CAPABILITIES,
   wireBodyOf,
   type RuntimeRuntime,
@@ -1722,6 +1723,189 @@ describe.skipIf(!appUrl || !migrationUrl)("BFF session recovery against real Pos
     expect((await fx.commandsOf(seeded.sid)).find((row) => row.id === sendCommandId)!.status).toBe("queued");
   }, 90_000);
 
+  /**
+   * create/resume **绝不**进入恢复循环：driver 对它们返回可恢复码时，走的是
+   * **有界失败分类**（`failureToOutcome`），而不是入队新的 resume。
+   *
+   * 注意这里断言的是**零新 resume / 零额外 POST**，不是"命令无限增长"：真实生产里
+   * create 期间 binding 仍是 `creating`，`requestResume` 会判定 `binding-not-active`
+   * 并返回 `denied`（同样零新 resume），后果是**同一条** create 被无限期 60s 长退避
+   * 且每次退还认领预算（"production create forever creating"）——命令数恒为 1。
+   */
+  it("never recovery-loops a create: a driver rejection is bounded failure classification, not a new resume", async () => {
+    const fx = await createFixture();
+    const cell = await startCell({ cellId: fx.cellId, bootId: "boot-A", tenantId: fx.tenantId, disk: fx.disk });
+    cells.push(cell);
+
+    // **注入**的 driver 拒绝：postCommand 被替换成确定性的 403 identity_invalid，
+    // 这不是真实 cell 的回答（真实 driver 不会替我们产生这个码），只为覆盖分类分支。
+    const denyingRuntime = makeRuntime({
+      store: fx.driverStore, cell, tenantId: fx.tenantId, workerId: "worker-create-deny", serviceToken: fx.serviceToken,
+      driver: {
+        ...createDriverHttpClient({ deadlineMs: 5_000 }),
+        postCommand: async () => ({
+          ok: false as const,
+          kind: "http" as const,
+          status: 403,
+          code: "identity_invalid",
+          reason: "注入的 driver 403（凭证或权限被拒）",
+          retryable: false,
+        }),
+      },
+    });
+
+    // 新建一个绑定（creating），它的 create 命令由**该注入 driver**投递并被 403。
+    const session = await denyingRuntime.createSession(fx.owner, fx.workId, "novel-chapter");
+    const before = (await fx.commandsOf(session.id)).length;
+    const round = await denyingRuntime.dispatcher.dispatchOnce();
+    expect(round).toMatchObject({ claimed: 1, settled: 0, failed: 1 });
+    const rows = await fx.commandsOf(session.id);
+    // create 走有界失败分类：明确拒绝 → failed（不会新生成 resume，也不会让路退还预算）。
+    expect(rows.find((row) => row.op === "create")!).toMatchObject({ status: "failed" });
+    // 关键：**零 resume**（若把 create 当可恢复，这里至少会走一次 requestRecovery）。
+    expect(rows.filter((row) => row.op === "resume")).toHaveLength(0);
+    // 绑定不会被伪造激活：create 没被接受就仍是 creating。
+    expect(await fx.bindingOf(session.id)).toMatchObject({ status: "creating" });
+    expect(rows.length).toBe(before);
+
+    // 再跑若干轮也不会有新的 resume / 新的 POST（命令已 failed，不再是候选）。
+    const postsBefore = cell.requests.filter((call) => call.method === "POST" && call.path === "/v1/commands").length;
+    for (let i = 0; i < 3; i += 1) await denyingRuntime.dispatcher.dispatchOnce();
+    expect((await fx.commandsOf(session.id)).filter((row) => row.op === "resume")).toHaveLength(0);
+    expect(cell.requests.filter((call) => call.method === "POST" && call.path === "/v1/commands").length).toBe(postsBefore);
+  }, 60_000);
+
+  it("never recovery-loops a resume: a driver rejection does not spawn another resume", async () => {
+    const fx = await createFixture();
+    const cellA = await startCell({ cellId: fx.cellId, bootId: "boot-A", tenantId: fx.tenantId, disk: fx.disk });
+    cells.push(cellA);
+    const seeded = await seedCommittedTurn(fx, cellA, "worker-a");
+
+    // 直接在库里放一条 queued 的 resume（模拟恢复已经入队），由**注入**的拒绝 driver 投递。
+    const attempt0 = recoveryCommandId({ tenantId: fx.tenantId, sessionId: seeded.sid, revision: 1, bootId: "boot-A", attempt: 0 });
+    await migration.insertInto("commands").values({
+      tenant_id: fx.tenantId, id: attempt0, binding_id: seeded.sid, work_id: fx.workId, actor_user_id: fx.owner.userId,
+      op: "resume", body_hash: sha256Hex(JSON.stringify(resumeBodyOf({ sessionId: seeded.sid, commandId: attempt0 }))),
+      body: resumeBodyOf({ sessionId: seeded.sid, commandId: attempt0 }), grant_revision: 1, status: "queued",
+    }).execute();
+
+    const denyingRuntime = makeRuntime({
+      store: fx.driverStore, cell: cellA, tenantId: fx.tenantId, workerId: "worker-resume-deny", serviceToken: fx.serviceToken,
+      driver: {
+        ...createDriverHttpClient({ deadlineMs: 5_000 }),
+        postCommand: async () => ({
+          ok: false as const,
+          kind: "http" as const,
+          status: 409,
+          code: "session_not_open",
+          reason: "注入的 driver 409（与既有命令冲突）",
+          retryable: false,
+        }),
+      },
+    });
+
+    const round = await denyingRuntime.dispatcher.dispatchOnce();
+    expect(round).toMatchObject({ claimed: 1, settled: 0, failed: 1 });
+    const rows = await fx.commandsOf(seeded.sid);
+    expect(rows.find((row) => row.id === attempt0)!).toMatchObject({ status: "failed" });
+    // 关键：resume 失败**不会**再生成第二条 resume（attempt 1/2/... 都不存在）。
+    expect(rows.filter((row) => row.op === "resume")).toHaveLength(1);
+    expect(rows.some((row) => row.id === recoveryCommandId({ tenantId: fx.tenantId, sessionId: seeded.sid, revision: 1, bootId: "boot-A", attempt: 1 }))).toBe(false);
+
+    // 多轮之后仍然只有这一条，且没有新增 POST（命令已 failed，不再是候选）。
+    const postsBefore = cellA.requests.filter((call) => call.method === "POST" && call.path === "/v1/commands").length;
+    for (let i = 0; i < 3; i += 1) await denyingRuntime.dispatcher.dispatchOnce();
+    expect((await fx.commandsOf(seeded.sid)).filter((row) => row.op === "resume")).toHaveLength(1);
+    expect(cellA.requests.filter((call) => call.method === "POST" && call.path === "/v1/commands").length).toBe(postsBefore);
+  }, 60_000);
+
+  it("classifies a retryable create/resume driver failure as bounded backoff, never a recovery loop", async () => {
+    const fx = await createFixture();
+    const cell = await startCell({ cellId: fx.cellId, bootId: "boot-A", tenantId: fx.tenantId, disk: fx.disk });
+    cells.push(cell);
+    await seedCommittedTurn(fx, cell, "worker-a");
+
+    // **注入**的可重试 503：create 必须**有界退避重试**，attempts 正常递增，
+    // 绝不因为"driver 说没打开"就入队 resume。max_attempts=2 时两轮之后进 dead。
+    const runtime = makeRuntime({
+      store: fx.driverStore, cell, tenantId: fx.tenantId, workerId: "worker-create-retry", serviceToken: fx.serviceToken,
+      driver: {
+        ...createDriverHttpClient({ deadlineMs: 5_000 }),
+        postCommand: async () => ({
+          ok: false as const,
+          kind: "http" as const,
+          status: 503,
+          code: "session_not_open",
+          reason: "注入的 driver 503（cell 内部错误）",
+          retryable: true,
+        }),
+      },
+    });
+    const session = await runtime.createSession(fx.owner, fx.workId, "novel-chapter");
+    await migration.updateTable("commands").set({ max_attempts: 2 }).where("tenant_id", "=", fx.tenantId).where("binding_id", "=", session.id).execute();
+
+    // 第一轮：release（退避），attempts 正常消耗到 1（**不是**让路的 0），零 resume。
+    const first = await runtime.dispatcher.dispatchOnce();
+    expect(first).toMatchObject({ claimed: 1, settled: 0, failed: 0, released: 1 });
+    let rows = await fx.commandsOf(session.id);
+    expect(rows.find((row) => row.op === "create")!).toMatchObject({ status: "queued", attempts: 1, max_attempts: 2 });
+    expect(rows.filter((row) => row.op === "resume")).toHaveLength(0);
+
+    // 第二轮（拨回 available_at）：attempts 撞上限 → dead，而不是被恢复无限延后。
+    await migration.updateTable("commands").set({ available_at: new Date(Date.now() - 1_000) }).where("tenant_id", "=", fx.tenantId).where("binding_id", "=", session.id).execute();
+    const second = await runtime.dispatcher.dispatchOnce();
+    expect(second).toMatchObject({ claimed: 1, failed: 0, released: 1 });
+    rows = await fx.commandsOf(session.id);
+    expect(rows.find((row) => row.op === "create")!).toMatchObject({ status: "dead", attempts: 2, max_attempts: 2 });
+    expect(rows.filter((row) => row.op === "resume")).toHaveLength(0);
+  }, 60_000);
+
+  /**
+   * 预检（open-proof boot 不匹配）**只对承载类命令生效**：create/resume 自己就是
+   * "打开会话"的动作，绝不能被"boot 不匹配"拦下再入队一条新 resume。
+   *
+   * 这条用真实 cell + 真实 open-proof：绑定由 boot-A 的 create 成功激活（回执 boot-A），
+   * 现在在 boot-B 上投递一条 **resume** —— open-proof 一定读到 mismatch。
+   * 若预检错误地作用于 resume，这一轮会变成"让路 + 入队新 resume（并可能 exhausted）"；
+   * 正确行为是**直接 POST 给 driver**，由 driver 结算。
+   */
+  it("does not preflight create/resume: a boot-mismatched resume still posts directly instead of spawning a new resume", async () => {
+    const fx = await createFixture();
+    const cellA = await startCell({ cellId: fx.cellId, bootId: "boot-A", tenantId: fx.tenantId, disk: fx.disk });
+    cells.push(cellA);
+    const seeded = await seedCommittedTurn(fx, cellA, "worker-a");
+    const cellB = await startCell({ cellId: fx.cellId, bootId: "boot-B", tenantId: fx.tenantId, disk: fx.disk });
+    cells.push(cellB);
+
+    // 直接入队一条 resume（模拟恢复已经请求过一次），不经过 `requestResume`。
+    const attempt0 = recoveryCommandId({ tenantId: fx.tenantId, sessionId: seeded.sid, revision: 1, bootId: "boot-B", attempt: 0 });
+    await migration.insertInto("commands").values({
+      tenant_id: fx.tenantId, id: attempt0, binding_id: seeded.sid, work_id: fx.workId, actor_user_id: fx.owner.userId,
+      op: "resume", body_hash: sha256Hex(JSON.stringify(resumeBodyOf({ sessionId: seeded.sid, commandId: attempt0 }))),
+      body: resumeBodyOf({ sessionId: seeded.sid, commandId: attempt0 }), grant_revision: 1, status: "queued",
+    }).execute();
+
+    const runtime = makeRuntime({ store: fx.driverStore, cell: cellB, tenantId: fx.tenantId, workerId: "worker-resume-preflight", serviceToken: fx.serviceToken });
+
+    // open-proof 在当前 boot-B 上看到 boot-A 的回执 —— 一定是 mismatch。
+    const proof = await new RuntimeSessionRecovery({ store: fx.store }).openProof(fx.tenantId, seeded.sid, "boot-B");
+    expect(proof.state).toBe("mismatch");
+
+    const before = cellB.requests.filter((call) => call.method === "POST" && call.path === "/v1/commands").length;
+    const round = await runtime.dispatcher.dispatchOnce();
+    // 直接投递并结算：**不是**让路（released=0），也**不是**失败。
+    expect(round).toMatchObject({ claimed: 1, settled: 1, released: 0, failed: 0 });
+    expect(cellB.requests.filter((call) => call.method === "POST" && call.path === "/v1/commands").length).toBe(before + 1);
+
+    const rows = await fx.commandsOf(seeded.sid);
+    expect(rows.find((row) => row.id === attempt0)!).toMatchObject({ status: "succeeded" });
+    // 没有因为预检新增第二条 resume（若预检误作用于 resume，这里会出现 attempt 1）。
+    expect(rows.filter((row) => row.op === "resume")).toHaveLength(1);
+    // POST 的正文就是这条 resume 自己的字节（op=sid=commandId），不是被替换过的。
+    const post = cellB.requests.filter((call) => call.method === "POST" && call.path === "/v1/commands").at(-1)!;
+    expect(JSON.parse(post.body!.toString("utf8"))).toEqual({ op: "resume", sid: seeded.sid, commandId: attempt0 });
+  }, 60_000);
+
   it("exposes the honest terminal recovery code through the real HTTP boundary (409 exhausted), never 503 reopening", async () => {
     const fx = await createFixture();
     const cellA = await startCell({ cellId: fx.cellId, bootId: "boot-A", tenantId: fx.tenantId, disk: fx.disk });
@@ -1805,6 +1989,21 @@ describe("recovery primitives (pure)", () => {
     expect(isRecoverableDriverCode("identity_invalid")).toBe(true);
     for (const code of ["not_owner", "identity_mismatch", "rev_stale", "session_revoked", "grant/expired", "grant_replay", "malformed_body", "no_receipt", undefined]) {
       expect(isRecoverableDriverCode(code)).toBe(false);
+    }
+  });
+
+  it("only lets carrying commands (send/cancel) trigger recovery; create/resume never do", () => {
+    // 承载类命令：本该已打开，driver 报"没打开"才是值得恢复的窗口。
+    expect(isRecoveryCarryingOp("send")).toBe(true);
+    expect(isRecoveryCarryingOp("cancel")).toBe(true);
+    // create/resume 自己就是"打开会话"的动作：把它们当可恢复只会让**同一条**命令
+    // 被无限期让路（生产里 create 时 binding 仍 creating ⇒ requestResume 判 denied，
+    // 零新 resume，但 create 永远不结算），因此绝不参与恢复。
+    expect(isRecoveryCarryingOp("create")).toBe(false);
+    expect(isRecoveryCarryingOp("resume")).toBe(false);
+    // 未知/订阅/空值一律不参与恢复（fail-closed）。
+    for (const op of ["subscribe", "unknown", "", undefined, null, 42]) {
+      expect(isRecoveryCarryingOp(op as string)).toBe(false);
     }
   });
 

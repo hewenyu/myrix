@@ -30,6 +30,7 @@ import {
   applyPasswordChangeProgress,
   assertPasswordUpdatePage,
   assertSessionRevoked,
+  classifySessionActivation,
   createPasswordChangeProgress,
   createPasswordProgressTracker,
   isDirectRun,
@@ -40,8 +41,10 @@ import {
   redactError,
   resolveScreenshotDir,
   safePathname,
+  sessionsListPath,
   shouldBlockExternalRequest,
   validateAcceptanceEnv,
+  waitForSessionActivation,
 } from '../acceptance/production-browser.mjs';
 
 const ORIGIN = 'https://myrix.example.test';
@@ -480,6 +483,190 @@ test('主流程在标记 passed 之前必须先通过 session_revoke_failed 校�
   assert.ok(revokeFlag < passed, 'passed=true must come after the revocation check');
   // 绝不再保留"用状态比较直接赋值、失败也继续"的旧写法。
   assert.equal(/report\.sessionRevoked\s*=\s*revoked\.status\s*===/.test(CODE), false);
+});
+
+/* ------------------------------------------------------------------ */
+/* 会话激活：创建后必须确认 active 才允许撤销                            */
+/* ------------------------------------------------------------------ */
+
+const CREATED = '44444444-4444-4444-8444-444444444444';
+const OTHER = '55555555-5555-4555-8555-555555555555';
+
+test('classifySessionActivation 只看精确 created id，绝不把"别的 active 会话"当成通过', () => {
+  assert.equal(classifySessionActivation({ items: [{ id: CREATED, status: 'active' }] }, CREATED), 'active');
+  assert.equal(classifySessionActivation({ items: [{ id: CREATED, status: 'creating' }] }, CREATED), 'creating');
+  assert.equal(classifySessionActivation({ items: [{ id: CREATED, status: 'revoked' }] }, CREATED), 'revoked');
+  assert.equal(classifySessionActivation({ items: [{ id: CREATED, status: 'closed' }] }, CREATED), 'revoked');
+
+  // 非匹配：列表里只有**别的** active 会话 → unknown（不是 active）。
+  assert.equal(classifySessionActivation({ items: [{ id: OTHER, status: 'active' }] }, CREATED), 'unknown');
+  assert.equal(classifySessionActivation({ items: [] }, CREATED), 'unknown');
+  assert.equal(classifySessionActivation({ items: [{ id: CREATED, status: 'unexpected' }] }, CREATED), 'invalid');
+
+  // 结构不可解析：一律 invalid，绝不推断。
+  for (const payload of [null, undefined, {}, { items: null }, { items: 'nope' }, 'nope', 42]) {
+    assert.equal(classifySessionActivation(payload, CREATED), 'invalid', `expected ${JSON.stringify(payload)} to be invalid`);
+  }
+  assert.equal(classifySessionActivation({ items: [{ id: CREATED, status: 'active' }] }, ''), 'invalid');
+  assert.equal(classifySessionActivation({ items: [{ id: CREATED, status: 'active' }] }, undefined), 'invalid');
+});
+
+test('sessionsListPath 只接受 UUID 作品 id，绝不拼接任意字符串', () => {
+  assert.equal(sessionsListPath(CREATED), `/api/v1/works/${CREATED}/sessions`);
+  for (const bad of [undefined, null, '', 'not-a-uuid', '../x', `${CREATED}/../y`, 42]) {
+    assert.throws(
+      () => sessionsListPath(bad),
+      error => error instanceof AcceptanceError && error.code === 'session_activation_invalid',
+      `expected ${String(bad)} to be rejected`,
+    );
+  }
+});
+
+/** 构造一个确定性的等待环境：受控时钟 + 记录轮询次数 + 预设响应序列。 */
+const waitEnv = responses => {
+  let index = 0;
+  let clock = 0;
+  const polls = [];
+  return {
+    get polls() {
+      return polls;
+    },
+    input: {
+      expectedId: CREATED,
+      now: () => clock,
+      sleep: async ms => {
+        clock += ms;
+      },
+      fetchList: async () => {
+        const next = responses[Math.min(index, responses.length - 1)];
+        index += 1;
+        polls.push(next);
+        if (next instanceof Error) throw next;
+        return typeof next === 'function' ? next() : next;
+      },
+    },
+  };
+};
+
+const ok = payload => ({ status: 200, json: async () => payload });
+
+test('waitForSessionActivation 只在精确 created id 达到 active 时放行', async () => {
+  // 第一轮 creating，第二轮 active：轮询到 active 才返回。
+  const env = waitEnv([
+    ok({ items: [{ id: CREATED, status: 'creating' }] }),
+    ok({ items: [{ id: CREATED, status: 'active' }] }),
+  ]);
+  assert.equal(await waitForSessionActivation(env.input), 'active');
+  assert.equal(env.polls.length, 2);
+
+  // 第一轮就是 active。
+  const first = waitEnv([ok({ items: [{ id: CREATED, status: 'active' }] })]);
+  assert.equal(await waitForSessionActivation(first.input), 'active');
+  assert.equal(first.polls.length, 1);
+});
+
+test('waitForSessionActivation 对未知/未匹配/网络失败继续有界轮询，超时固定失败', async () => {
+  // 永远没有该 id（含"别的会话 active"）：必须超时，绝不能返回 active。
+  const unknown = waitEnv([ok({ items: [{ id: OTHER, status: 'active' }] })]);
+  await assert.rejects(
+    () => waitForSessionActivation({ ...unknown.input, timeoutMs: 2_000, pollMs: 500 }),
+    error => error instanceof AcceptanceError && error.code === 'session_activation_timeout',
+  );
+  // 有界：2s / 500ms 轮询，绝不会无限循环。
+  assert.ok(unknown.polls.length <= 6, `expected bounded polls, got ${unknown.polls.length}`);
+  assert.ok(unknown.polls.length >= 2, 'expected at least one retry before the deadline');
+
+  // 网络异常按"尚未确认"继续，最终同样超时（绝不把异常当成 active）。
+  const flaky = waitEnv([new Error('network down'), new Error('network down')]);
+  await assert.rejects(
+    () => waitForSessionActivation({ ...flaky.input, timeoutMs: 1_000, pollMs: 500 }),
+    error => error instanceof AcceptanceError && error.code === 'session_activation_timeout',
+  );
+
+  // 非 200 也是"尚未确认"。
+  const bad = waitEnv([{ status: 503, json: async () => ({ items: [] }) }]);
+  await assert.rejects(
+    () => waitForSessionActivation({ ...bad.input, timeoutMs: 1_000, pollMs: 500 }),
+    error => error instanceof AcceptanceError && error.code === 'session_activation_timeout',
+  );
+});
+
+test('waitForSessionActivation 把 3xx 重定向按非 200 fail-closed，绝不跟随成 active', async () => {
+  // 调用方用 `maxRedirects: 0` 保证重定向不会被自动跟随，而是原样暴露成 3xx。
+  // 这里注入 3xx 响应（即使它带着一个"看起来 active"的正文），必须仍然按"尚未确认"
+  // 继续有界轮询 —— 绝不能因为跟随重定向拿到一个伪造的 200 列表就放行撤销。
+  for (const status of [301, 302, 303, 307, 308]) {
+    let jsonCalls = 0;
+    const redirected = waitEnv([
+      { status, json: async () => { jsonCalls += 1; return { items: [{ id: CREATED, status: 'active' }] }; } },
+    ]);
+    await assert.rejects(
+      () => waitForSessionActivation({ ...redirected.input, timeoutMs: 500, pollMs: 500 }),
+      error => error instanceof AcceptanceError && error.code === 'session_activation_timeout',
+      `status ${status} must not be accepted as active`,
+    );
+    // 非 200 时绝不解析正文，因此伪造的 active 永远不会被读进来。
+    assert.equal(jsonCalls, 0, `status ${status} must not have its body parsed`);
+  }
+
+  // 只有精确 200 才允许进入分类逻辑。
+  const ok200 = waitEnv([ok({ items: [{ id: CREATED, status: 'active' }] })]);
+  assert.equal(await waitForSessionActivation(ok200.input), 'active');
+});
+
+test('waitForSessionActivation 对已撤销会话与不可解析响应给固定终止 code', async () => {
+  const revoked = waitEnv([ok({ items: [{ id: CREATED, status: 'revoked' }] })]);
+  await assert.rejects(
+    () => waitForSessionActivation(revoked.input),
+    error => error instanceof AcceptanceError && error.code === 'session_already_revoked',
+  );
+  assert.equal(revoked.polls.length, 1, 'a revoked session must terminate immediately, not poll');
+
+  const invalid = waitEnv([ok({ items: 'nope' })]);
+  await assert.rejects(
+    () => waitForSessionActivation(invalid.input),
+    error => error instanceof AcceptanceError && error.code === 'session_activation_invalid',
+  );
+  assert.equal(invalid.polls.length, 1, 'an unparsable list must terminate immediately, not poll');
+});
+
+test('激活失败与超时的固定文案可被 redactError 映射且不泄露细节', () => {
+  for (const code of ['session_activation_timeout', 'session_activation_invalid', 'session_already_revoked']) {
+    const redacted = redactError(new AcceptanceError(code));
+    assert.equal(redacted.code, code);
+    assert.equal(typeof redacted.message, 'string');
+    holdsNoSecret(redacted);
+  }
+});
+
+test('主流程必须在撤销之前捕获 created id 并轮询到 active（静态契约）', () => {
+  const captureId = CODE.indexOf('report.sessionId = sessionCreated.body.id;');
+  const waitActive = CODE.indexOf('await waitForSessionActivation({');
+  const revoke = CODE.indexOf('assertSessionRevoked(revoked);');
+  const passed = CODE.indexOf('report.passed = true;');
+  assert.notEqual(captureId, -1, 'main must capture the created session id');
+  assert.notEqual(waitActive, -1, 'main must wait for activation before revoking');
+  assert.notEqual(revoke, -1);
+  assert.notEqual(passed, -1);
+  // 顺序：捕获 id → 等 active → 撤销 → passed。
+  assert.ok(captureId < waitActive, 'the created id must be captured before the activation wait');
+  assert.ok(waitActive < revoke, 'activation must be confirmed before the revoke call');
+  assert.ok(revoke < passed, 'the revoke assertion must still precede passed=true');
+  // 激活轮询必须走**同源已认证**的 GET sessions，且带 UUID 校验后的路径。
+  assert.match(CODE, /context\.request\.get\(`\$\{input\.origin\}\$\{sessionsListPath\(report\.workId\)\}`/);
+  // fail-closed 非 200：激活轮询必须显式 `maxRedirects: 0`，绝不自动跟随重定向。
+  // 否则 3xx 会被 Playwright 跟随成一个可能伪造的 200 会话列表，绕过激活判定。
+  assert.match(
+    CODE,
+    /context\.request\.get\(`\$\{input\.origin\}\$\{sessionsListPath\(report\.workId\)\}`,\s*\{\s*maxRedirects:\s*0,\s*timeout:\s*15_000\s*\}\)/,
+    'the activation poll must pin maxRedirects: 0 so a redirect surfaces as non-200',
+  );
+  // 同一断言的反向守卫：只要出现该 GET，就必须在同一调用里带 maxRedirects: 0。
+  const activationCall = CODE.match(/context\.request\.get\(`\$\{input\.origin\}\$\{sessionsListPath\(report\.workId\)\}`[\s\S]{0,160}?timeout:\s*15_000\s*\}\)/)?.[0] ?? '';
+  assert.notEqual(activationCall, '', 'the activation poll GET call must exist with its bounded options');
+  assert.match(activationCall, /maxRedirects:\s*0/);
+  // 绝不发送模型请求：轮询只读会话列表，不触碰 messages 端点。
+  assert.equal(/\/messages/.test(CODE), false, 'the acceptance runner must never hit the messages endpoint');
 });
 
 /* ------------------------------------------------------------------ */

@@ -9,11 +9,14 @@ import {
   BindingLeaseConfigError,
   DEFAULT_REFRESH_MS,
   DEFAULT_TTL_MS,
+  MAX_INTERNAL_HTTP_ORIGINS,
   MAX_TTL_MS,
+  normalizeInternalHttpOrigin,
   normalizeOrigin,
   redact,
   renderPath,
   resolveConfig,
+  resolveInternalHttpOrigins,
 } from '../src/index'
 import { TEST_TOKEN } from './harness'
 
@@ -48,6 +51,79 @@ describe('origin 校验', () => {
     ]) {
       expect(() => normalizeOrigin(origin)).toThrow(BindingLeaseConfigError)
     }
+  })
+})
+
+describe('同机内部 HTTP 声明（ADR 0030）', () => {
+  it('默认空列表：非回环明文仍然拒绝，回环与 HTTPS 照常', () => {
+    expect(resolveInternalHttpOrigins(undefined)).toEqual([])
+    expect(() => normalizeOrigin('http://bff:8791')).toThrow(/回环/)
+    expect(normalizeOrigin('http://127.0.0.1:8081')).toBe('http://127.0.0.1:8081')
+    expect(normalizeOrigin('https://works.internal:8443')).toBe('https://works.internal:8443')
+  })
+
+  it('声明后只放行精确匹配的 origin：端口不匹配、公网域名、IP 全部仍拒绝', () => {
+    const allowed = resolveInternalHttpOrigins(['http://bff:8791', 'http://gateway:8790'])
+    expect(allowed).toEqual(['http://bff:8791', 'http://gateway:8790'])
+    expect(normalizeOrigin('http://bff:8791', allowed)).toBe('http://bff:8791')
+    expect(normalizeOrigin('http://gateway:8790', allowed)).toBe('http://gateway:8790')
+    // 精确匹配：声明了 8791 不等于放行 8792 / 无端口 / 其它主机。
+    expect(() => normalizeOrigin('http://bff:8792', allowed)).toThrow(/回环/)
+    expect(() => normalizeOrigin('http://bff', allowed)).toThrow(/回环/)
+    expect(() => normalizeOrigin('http://evil.example:8791', allowed)).toThrow(/回环/)
+    expect(() => normalizeOrigin('http://10.0.0.7:8791', allowed)).toThrow(/回环/)
+    // 大写的规范写法会被 `new URL` 折成小写 origin，与声明一致才放行。
+    expect(normalizeOrigin('http://BFF:8791', allowed)).toBe('http://bff:8791')
+  })
+
+  it('拒绝通配符、路径、查询、凭据、非 HTTP 协议与多标签域名', () => {
+    const invalid = [
+      'http://*:8791',
+      'http://*.bff:8791',
+      'http://bff:8791/path',
+      'http://bff:8791/',
+      'http://bff:8791?x=1',
+      'http://bff:8791#frag',
+      'http://user:secret@bff:8791',
+      'https://bff:8791',
+      'ftp://bff:8791',
+      'http://8.8.8.8:8791',
+      'http://bff.example:8791',
+      'http://[::1]:8791',
+      'not-a-url',
+      '',
+    ]
+    for (const origin of invalid) {
+      expect(() => normalizeInternalHttpOrigin(origin), `rejected ${origin}`).toThrow(BindingLeaseConfigError)
+    }
+  })
+
+  it('声明本身不是字符串数组、超长或含非法项都拒绝，且不回显原始值', () => {
+    expect(() => resolveInternalHttpOrigins('http://bff:8791')).toThrow(/字符串数组/)
+    expect(() => resolveInternalHttpOrigins([null])).toThrow(BindingLeaseConfigError)
+    expect(() => resolveInternalHttpOrigins(Array.from({ length: MAX_INTERNAL_HTTP_ORIGINS + 1 }, () => 'http://bff:8791')))
+      .toThrow(/最多/)
+    // 非法项即使与本次 origin 无关也必须在启动时失败，而不是被忽略。
+    expect(() => resolveConfig({ ...base, internalHttpOrigins: ['http://bff:8791', 'http://*:1'] }))
+      .toThrow(BindingLeaseConfigError)
+    try {
+      resolveInternalHttpOrigins(['http://user:secret@bff:8791'])
+      expect.unreachable('内嵌凭据必须被拒')
+    } catch (error) {
+      expect(String(error)).not.toContain('secret')
+    }
+  })
+
+  it('声明去重并保持顺序；resolveConfig 把它带进解析结果', () => {
+    const cfg = resolveConfig({
+      ...base,
+      origin: 'http://bff:8791',
+      internalHttpOrigins: ['http://bff:8791', 'http://gateway:8790', 'http://bff:8791'],
+    })
+    expect(cfg.origin).toBe('http://bff:8791')
+    expect(cfg.internalHttpOrigins).toEqual(['http://bff:8791', 'http://gateway:8790'])
+    // 默认（未声明）时解析结果仍是空数组，而不是 undefined。
+    expect(resolveConfig(base).internalHttpOrigins).toEqual([])
   })
 })
 
