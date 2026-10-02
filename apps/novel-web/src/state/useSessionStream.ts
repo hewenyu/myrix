@@ -237,7 +237,8 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
       reportStreamConnected(false);
       setConnected(false);
     };
-  }, [sessionId]);
+    // effect 捕获所属代际，因此显式跟踪它；代际只随会话归属变化递增。
+  }, [ownership.generation, sessionId]);
 
   // 提交卸载时立即失效：迟到的请求结果和延迟调用的旧回调都不得继续写入或发请求。
   // layout 生命周期先于连接的 passive effect，StrictMode 重放时也会先恢复 mounted。

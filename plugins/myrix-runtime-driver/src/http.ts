@@ -188,8 +188,6 @@ export function sseSink(res: ServerResponse, options: SseSinkOptions = {}): SseS
   const retryMs = options.retryMs ?? 3000
   const maxBufferedBytes = options.maxBufferedBytes ?? DEFAULT_SSE_MAX_BUFFERED_BYTES
   let open = true
-  /** 本条连接是否因背压被我们主动断开；供诊断与测试区分"对端关闭"。 */
-  let backpressured = false
   const onClose = (): void => {
     open = false
   }
@@ -213,7 +211,6 @@ export function sseSink(res: ServerResponse, options: SseSinkOptions = {}): SseS
       if (!open || res.writableEnded) return false
       // 写入**之前**看水位：等 `write` 返回 false 时数据已经进了缓冲。
       if (res.writableLength > maxBufferedBytes) {
-        backpressured = true
         open = false
         res.removeListener('close', onClose)
         try {

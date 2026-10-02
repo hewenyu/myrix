@@ -1,0 +1,14 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "oxc", "react"],
+  "categories": { "correctness": "error" },
+  "ignorePatterns": ["vendor/**", "node_modules/**", "**/dist/**", "**/coverage/**", ".team/**", ".pnpm-store/**", ".pnpm-cache/**", ".pnpm-state/**", ".cache/**"],
+  "rules": {
+    "no-debugger": "error",
+    "react/set-state-in-effect": "off",
+    "react/refs": "off",
+    "react/globals": "off",
+    "react/immutability": "off",
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_", "caughtErrorsIgnorePattern": "^_" }]
+  }
+}

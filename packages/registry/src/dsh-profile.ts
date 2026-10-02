@@ -1,4 +1,3 @@
-import type { EntitlementSet } from "@myrix/contracts";
 import type { PluginCatalog } from "./catalog";
 import type { ProfileSpec } from "./profile";
 

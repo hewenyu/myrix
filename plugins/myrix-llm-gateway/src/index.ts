@@ -23,7 +23,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { PrincipalRegistry } from '@myrix/principals'
 import { GatewayAdapter, type GatewayAdapterOptions } from './adapter.ts'
-import { DEFAULT_PROVIDER, RESPONSES_PATH, resolveConfig, type ResolvedGatewayConfig } from './config.ts'
+import { DEFAULT_PROVIDER, resolveConfig, type ResolvedGatewayConfig } from './config.ts'
 import type { Config, GatewayCellTokenResolver } from './types.ts'
 
 export { GatewayAdapter } from './adapter.ts'

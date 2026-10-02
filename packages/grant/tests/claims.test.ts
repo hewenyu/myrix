@@ -7,14 +7,10 @@ import {
   type GrantClaimsJson,
 } from "../src/index";
 import {
-  AUDIENCE,
-  BOOT,
-  BODY_HASH,
   ISSUER,
   NOW,
   OTHER_BODY_HASH,
   OTHER_BOOT,
-  TENANT,
   baseClaims,
   binding,
   claimWith,
@@ -218,7 +214,7 @@ describe("payload 编解码边界", () => {
     const harness = createHarness();
     // 攻击者能看到明文 payload，但改任何一个字节都会破坏签名。
     const issued = harness.issue();
-    const [h, p, s] = issued.token.split(".");
+    const [h, , s] = issued.token.split(".");
     const tampered = encodeBase64Url(Buffer.from(JSON.stringify({ ...issued.claims, sub: "u_9999" }), "utf8"));
     const decoded = decodePayloadObject(Buffer.from(tampered, "base64url"));
     expect(decoded["sub"]).toBe("u_9999");

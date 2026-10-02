@@ -48,7 +48,7 @@ export class PolicyClient {
       const ttl = this.options.cacheTtlMs ?? 15_000;
       if (ttl > 0) this.cache.set(key, { decision: payload.decision, expiresAt: now + ttl });
       return payload.decision;
-    } catch (error) {
+    } catch {
       // 治理平面不可用时默认拒绝：企业场景下"放行"的代价远高于"阻断"
       return {
         effect: "deny",

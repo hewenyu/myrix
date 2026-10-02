@@ -25,13 +25,14 @@
  *      不存在"网络不通也回 accepted"的路径。
  *   5. **有界解析**：driver 响应体、SSE 单帧、投影出的文本长度都有硬上限。
  *
- * 写入边界：本文件只读 `@myrix/*` 与 `apps/bff/src/ports.ts` 的公开契约，
+ * 写入边界：除同事务审计的已登记迁移例外外，使用 `@myrix/*` 与本地 ports 的公开契约，
  * 不修改 platform-store / grant / DSH。
  */
 import type { NovelPreset, NovelSession, PlatformIdentity, QueuedCommand, SessionStreamEvent } from "@myrix/contracts";
 import type { GrantSigner } from "@myrix/grant";
 import {
   claimSessionCommand,
+  CommandsRepository,
   OutboxRepository,
   PlatformStore,
   PlatformStoreError,
@@ -40,7 +41,6 @@ import {
   type ServiceCapability,
   type SessionBindingRecord,
 } from "@myrix/platform-store";
-import { CommandsRepository } from "../../../packages/platform-store/src/repositories/commands";
 import { insertAuditEvent } from "../../../packages/platform-store/src/repositories/audit";
 import { sql } from "kysely";
 import { authorizePlatform, type PlatformAuthorization } from "@myrix/governance";

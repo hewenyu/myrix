@@ -116,7 +116,10 @@ export class FakeGateway {
   async close(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       this.server.closeAllConnections()
-      this.server.close((error) => { error === undefined ? resolve() : reject(error) })
+      this.server.close((error) => {
+        if (error === undefined) resolve()
+        else reject(error)
+      })
     })
   }
 }

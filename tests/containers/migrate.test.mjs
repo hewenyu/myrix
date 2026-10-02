@@ -122,7 +122,7 @@ test('every printed error is redacted', () => {
   assert.match(message, /\[redacted\]/)
 })
 
-test('each target runs only its own runner, with its own URL', async (t) => {
+test('each target runs only its own runner, with its own URL', async () => {
   const calls = []
   const migrate = {
     business: async (url) => {

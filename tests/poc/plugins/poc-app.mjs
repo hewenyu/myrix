@@ -178,7 +178,7 @@ export function apply(ctx, config) {
         sessionId: sid,
         meta: { agentPreset: 'myrix-empty' },
         agentOptions: { provider: 'poc-mock', model: 'poc-model' },
-        setup: async (agentCtx, agent) => {
+        setup: async (agentCtx, _agent) => {
           setupRan = true
           // A7 decision: `await presets.mount()` inside setup.
           const preset = await ctx.agentPresets.mount(agentCtx, 'myrix-empty')

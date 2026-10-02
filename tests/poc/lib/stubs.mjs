@@ -46,7 +46,10 @@ function listen(server) {
 function closeServer(server) {
   return new Promise((resolve, reject) => {
     server.closeAllConnections()
-    server.close((error) => { error === undefined ? resolve() : reject(error) })
+    server.close((error) => {
+      if (error === undefined) resolve()
+      else reject(error)
+    })
   })
 }
 

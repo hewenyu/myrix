@@ -454,7 +454,7 @@ test("生成的秘密文件权限一律 0600，且不覆盖已有文件", async 
   const dir = await mkdtemp(join(tmpdir(), "myrix-vps-init-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
 
-  const deployment = await generateAll(dir);
+  await generateAll(dir);
 
   const modes = await collectModes(dir);
   assert.ok(Object.keys(modes).length >= 12, "应生成完整的配置/ SQL 集合");
@@ -510,7 +510,6 @@ test("dangling symlink / 父级 symlink 目标在写第一份秘密前被拒绝�
   await writeSecure(outside, "sentinel", "ORIGINAL\n");
 
   // 1) 目标本身是 dangling symlink（stat 会漏掉，lstat 必须抓到）指向 root 外。
-  const danglingTarget = join(dir, "secrets");
   await writeSecure(dir, "keep", "k\n");
   await symlink(join(outside, "does-not-exist"), join(dir, TARGETS.composeEnv), "file");
   await assert.rejects(() => preflightTargets(dir, [TARGETS.composeEnv]), InitError);

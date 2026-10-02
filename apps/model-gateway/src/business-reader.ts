@@ -1,4 +1,4 @@
-import type { PlatformStore } from "../../../packages/platform-store/src/store";
+import type { PlatformStore } from "@myrix/platform-store";
 import type { BusinessReaders } from "./db/credentials";
 
 /** Production business reads use the same nonowner RLS boundary as BFF repositories. */

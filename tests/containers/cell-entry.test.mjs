@@ -17,9 +17,9 @@
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
@@ -63,9 +63,18 @@ function fakeSecret(seed) {
 /**
  * A complete, legal deployment environment.
  *
- * `MYRIX_REPO_ROOT` is pointed at this checkout so no test needs the image.
+ * Model separate application/home mounts, even when TMPDIR is inside this checkout.
+ * Only fixture files are copied; source/dependencies remain read-only references.
  */
 function baseEnv(home) {
+  const app = join(dirname(home), 'app')
+  if (!existsSync(app)) {
+    mkdirSync(app, { recursive: true })
+    cpSync(join(APP_ROOT, 'bundles'), join(app, 'bundles'), { recursive: true })
+    for (const entry of ['tests', 'plugins', 'packages', 'node_modules']) {
+      symlinkSync(join(APP_ROOT, entry), join(app, entry), 'dir')
+    }
+  }
   return {
     DSH_HOME: home,
     MYRIX_CELL_ID: 'cell-t1',
@@ -80,7 +89,7 @@ function baseEnv(home) {
     MYRIX_GATEWAY_TOKEN: fakeSecret('gateway'),
     MYRIX_DRAIN_TOKEN: fakeSecret('drain'),
     MYRIX_REVOKE_TOKEN: fakeSecret('revoke'),
-    MYRIX_REPO_ROOT: APP_ROOT,
+    MYRIX_REPO_ROOT: app,
   }
 }
 
@@ -220,12 +229,12 @@ test('paths stay inside the writable home and never touch the application root',
   assert.throws(() => resolveCellConfig({ ...baseEnv(home), DSH_HOME: 'home' }), /absolute path/)
   assert.throws(() => resolveCellConfig({ ...baseEnv(home), DSH_HOME: '/' }), /filesystem root/)
   assert.throws(() => resolveCellConfig({ ...baseEnv(home), DSH_HOME: '/tmp' }), /persistent volume/)
-  assert.throws(() => resolveCellConfig({ ...baseEnv(home), DSH_HOME: resolve(APP_ROOT, 'data') }), /read-only application root/)
+  assert.throws(() => resolveCellConfig({ ...baseEnv(home), DSH_HOME: resolve(baseEnv(home).MYRIX_REPO_ROOT, 'data') }), /read-only application root/)
 
   // The generated profile lives under the home; nothing is compiled into /app.
   const config = resolveCellConfig(baseEnv(home))
   assert.ok(config.home.startsWith(realpathSync(dir)))
-  assert.ok(!config.home.startsWith(APP_ROOT))
+  assert.ok(!config.home.startsWith(config.appRoot))
 })
 
 test('the child environment is an allowlist that drops ambient secrets', (t) => {

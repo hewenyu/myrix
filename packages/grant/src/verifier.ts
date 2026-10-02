@@ -23,7 +23,6 @@ import {
   GRANT_OPERATIONS,
   isGrantOperation,
   readClaim,
-  type GrantOperation,
 } from "./claims";
 import type { GrantClock } from "./clock";
 import { systemClockSeconds } from "./clock";
@@ -31,7 +30,7 @@ import { GrantError } from "./errors";
 import { decodeJwsCompact, decodePayloadObject } from "./jws";
 import { normalizeKeyset, selectVerificationKey, type GrantPublicJwk, type NormalizedKeyset } from "./keys";
 import { createJtiStore, type JtiStore } from "./jti";
-import type { GrantAuditClaims, GrantClaims, GrantClaimsJson, GrantVerifyBinding } from "./types";
+import type { GrantAuditClaims, GrantClaims, GrantVerifyBinding } from "./types";
 
 /** 默认允许的时钟偏差（秒）。只放宽“刚过期/时间稍前”，不放宽 boot 与 iat 门槛。 */
 export const DEFAULT_CLOCK_SKEW_SECONDS = 5;

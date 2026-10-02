@@ -105,7 +105,20 @@ export interface ResponseGatewayInput {
 
 export type GatewayResponse =
   | { kind: "json"; status: number; body: unknown }
-  | { kind: "sse"; status: number; headers: Record<string, string>; stream: AsyncIterable<string> }
+  | {
+      kind: "sse";
+      status: number;
+      headers: Record<string, string>;
+      stream: AsyncIterable<string>;
+      /**
+       * 合并后的取消信号（客户端断线 + gateway 内部超时/撤权），**必须**转交给写出层：
+       * 慢消费者把写循环挂在 drain 上时，只有监听它才能被 gateway 内部的 timeout/撤权
+       * 唤醒。否则内部 timeout 只能中止上游连接，写循环永远等不到 `'drain'` →
+       * 迭代器 `finally` 不结算、响应不 `end()`，连接与账本一起挂死。
+       * 生命周期与 `stream` 一致：迭代器 finally 里的清理会摘掉该信号的转发监听。
+       */
+      signal: AbortSignal;
+    }
   | { kind: "error"; status: number; body: { error: { message: string; type: string; code: string } } };
 
 export const SSE_HEADERS: Record<string, string> = {
@@ -241,11 +254,17 @@ export class ModelGateway {
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error("myrix: gateway timeout")), config.limits.upstreamTimeoutMs);
+    const abortUpstream = (reason: Error): void => {
+      // 即使合并旁路的监听已被清理（极端时序：流刚结束就又收到撤权判定），
+      // 也要保证内部 controller 真的被 abort —— 结算判定读的是 controller.signal.aborted。
+      if (!controller.signal.aborted) controller.abort(reason);
+    };
+    const timeout = setTimeout(() => abortUpstream(new Error("myrix: gateway timeout")), config.limits.upstreamTimeoutMs);
     const merged = combineSignals([input.clientSignal, controller.signal]);
     const state: UpstreamState = { upstreamStarted: false, revoked: false, settled: false };
     // 流式响应在请求处理函数返回之后才真正传输，因此合并信号必须活到流结束；
     // 只有非流式路径在这里同步清理。否则 abort 不会传到上游连接（会继续烧额度）。
+    // 同时把合并信号暴露给 HTTP 写出层：慢消费者等 drain 时也要能被内部 timeout/撤权唤醒。
     let disposeBeforeReturn = true;
     const cleanup = (): void => {
       clearTimeout(timeout);
@@ -271,7 +290,8 @@ export class ModelGateway {
           kind: "sse",
           status: 200,
           headers: { ...SSE_HEADERS },
-          stream: this.#streamResponse({ response, input, principal, requestedModel, parsed, state, controller, startedAt, cleanup }),
+          stream: this.#streamResponse({ response, input, principal, requestedModel, parsed, state, controller, abortUpstream, startedAt, cleanup }),
+          signal: merged.signal,
         };
       }
       return await this.#jsonResponse({ response, input, principal, requestedModel, parsed, startedAt, state });
@@ -439,10 +459,11 @@ export class ModelGateway {
     parsed: ParsedResponseRequest;
     state: UpstreamState;
     controller: AbortController;
+    abortUpstream: (reason: Error) => void;
     startedAt: number;
     cleanup: () => void;
   }): AsyncGenerator<string> {
-    const { input, principal, parsed, state, controller, response } = ctx;
+    const { input, principal, state, controller, abortUpstream, response } = ctx;
     let usage: TokenUsage | undefined;
     /** 只有 response.completed 才算成功结束 */
     let succeeded = false;
@@ -461,13 +482,13 @@ export class ModelGateway {
         .then((ok) => {
           if (!ok) {
             state.revoked = true;
-            controller.abort(new Error("myrix: authorization revoked"));
+            abortUpstream(new Error("myrix: authorization revoked"));
           }
         })
         .catch(() => {
           // 轮询失败按"权限已失效"处理（fail-closed）
           state.revoked = true;
-          controller.abort(new Error("myrix: authorization check failed"));
+          abortUpstream(new Error("myrix: authorization check failed"));
         })
         .finally(() => {
           polling = false;

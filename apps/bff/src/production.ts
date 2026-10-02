@@ -2,7 +2,7 @@ import { Kysely, PostgresDialect } from "kysely";
 import { Pool } from "pg";
 import type { FastifyInstance } from "fastify";
 import { authorizePlatform } from "@myrix/governance";
-import { NOVEL_TOOLS } from "../../../plugins/myrix-novel/src/protocol";
+import { NOVEL_TOOLS } from "@myrix/novel/protocol";
 import { PlatformStore, assertRuntimeDatabase, createGovernanceAuthorizer, createPlatformDatabase, createPlatformPool } from "@myrix/platform-store";
 import { PostgresAuthRepository } from "./auth-store";
 import { createOidcAdapter } from "./oidc";

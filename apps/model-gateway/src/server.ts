@@ -4,6 +4,10 @@
  * 只做传输层的事：正文上限、头解析、把客户端断线转成 AbortSignal、把
  * `ModelGateway` 的结果写成 HTTP。所有判定与计量都在 gateway.ts 里，便于单测。
  *
+ * 流式取消有两条来源，必须都接到写出层：客户端断线（本层 `controller`）与 gateway
+ * 内部的 timeout/撤权（`GatewayResponse.signal`）。只接前者时，慢消费者把写循环挂在
+ * drain 上，内部超时唤不醒它 → 迭代器 finally 不结算、响应不 end()，永久挂死。
+ *
  * **不存在 chat/completions**：该路径没有注册任何路由（Fastify 404），也没有
  * 兼容层、隐式转换或失败回退（AGENTS.md 硬性规则 6）。notFound 处理器显式说明
  * 这一点，避免客户端把 404 误读成"临时故障"而重试旧协议。
@@ -19,6 +23,7 @@ import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import { GatewayError } from "./errors";
 import type { GatewayResponse, ResponseGatewayInput } from "./gateway";
 import { ModelGateway } from "./gateway";
+import { createSseWriter } from "./stream";
 import { requestIdFrom } from "./util";
 
 export interface ModelGatewayServerOptions {
@@ -103,35 +108,60 @@ export async function createModelGatewayServer(options: ModelGatewayServerOption
       clientSignal: controller.signal,
     };
 
+    // 客户端可能在 `handleResponse` 等待上游响应头期间就挂断（此时还没写任何一行）。
+    // 请求侧 `'aborted'` 只在**请求体没读完**时触发：正文读完后的断线不触发它（实测），
+    // 所以唯一可靠的信号是响应侧 `'close'` —— 必须**提前**挂上，否则 writer 要等
+    // handleResponse 返回后才监听，会漏掉这次断线（流继续拉、额度继续烧）。
+    const onClientClose = (): void => {
+      if (!reply.raw.writableEnded) abort();
+    };
+    reply.raw.once("close", onClientClose);
+
     let result: GatewayResponse;
     try {
       result = await options.gateway.handleResponse(input);
-    } finally {
+    } catch (error) {
+      reply.raw.off("close", onClientClose);
       request.raw.off("aborted", abort);
+      throw error;
     }
+    request.raw.off("aborted", abort);
 
     if (result.kind === "error" || result.kind === "json") {
-      request.raw.off("aborted", abort);
+      reply.raw.off("close", onClientClose);
       return reply.code(result.status).send(result.body);
     }
 
     // SSE：接管响应，逐块写回。
+    //
+    // 背压：`raw.write()` 返回 false 表示内核写缓冲已满（消费者读得比上游慢）。
+    // 旧实现直接忽略返回值，于是一个不读响应的客户端能让 Node 缓冲无限增长（每连接
+    // 可吃光内存），同时网关继续全速消费上游并烧额度。现在把写出交给 stream.ts 的
+    // writer：write=false 时等 drain，并在等待期间同时响应 close/error 与
+    // **gateway 暴露的合并信号**（内部 timeout / 撤权）。
+    //
+    // 两个控制器必须分开：`controller` 是 HTTP 边界从客户端断线推出来的取消源，
+    // writer 需要能通过它主动 abort 上游；`result.signal` 是 gateway 内部
+    // client+timeout+revocation 的合并结果，只用于**观察**。只监听前者时，gateway
+    // 自己的 timeout/撤权只向内传播，唤不醒等 drain 的写循环 → iterator finally
+    // 不结算、响应不 end()，连接与账本一起挂死。
     reply.hijack();
     const raw = reply.raw;
-    // 响应侧 'close' 且尚未 end() = 客户端在读流期间挂断 → 取消上游，不继续烧额度。
-    raw.once("close", () => {
-      if (!raw.writableEnded) abort();
-    });
+    const writer = createSseWriter({ writable: raw, upstream: controller, upstreamSignal: result.signal });
     raw.writeHead(result.status, { ...result.headers });
     try {
       for await (const chunk of result.stream) {
         if (raw.writableEnded || raw.destroyed) break;
-        raw.write(chunk);
+        const written = await writer.write(chunk);
+        // 非 written = 消费者不可写或上游已被中止：不再从上游拉取分片。
+        if (written.status === "aborted") break;
       }
       if (!raw.writableEnded) raw.end();
     } catch {
       if (!raw.writableEnded) raw.end();
     } finally {
+      raw.off("close", onClientClose);
+      writer.dispose();
       request.raw.off("aborted", abort);
     }
     return reply;

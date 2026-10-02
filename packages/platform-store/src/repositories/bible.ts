@@ -74,7 +74,6 @@ export class BibleRepository {
     }
     const summary = input.summary ?? "";
     const attributes = normalizeAttributes(input.attributes ?? {});
-    const contentHash = hashJson({ kind: input.kind, name, summary, attributes });
 
     return this.store.withTenant({ tenantId, actorUserId }, async (tx) => {
       await assertWorkOwned(tx, actorUserId, input.workId);
@@ -402,7 +401,7 @@ function escapeLike(input: string): string {
   return input.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
-function isPrefixMatch(name: string, _prefixPattern: string): boolean {
+function isPrefixMatch(_name: string, _prefixPattern: string): boolean {
   return false;
 }
 

@@ -3,10 +3,10 @@ import Fastify, { type FastifyError } from "fastify";
 import { sql } from "kysely";
 import { authorizePlatform } from "@myrix/governance";
 import type { PlatformIdentity } from "@myrix/contracts";
-import type { PlatformStore } from "../../../packages/platform-store/src/store";
+import type { PlatformStore } from "@myrix/platform-store";
 import { ApiFailure } from "./ports";
 import { PostgresNovelRepository, TransactionBoundStore, throwApiError } from "./novel-store";
-import { isNovelTool, parseToolArguments, PRESET_TOOLS, type NovelToolName } from "../../../plugins/myrix-novel/src/protocol";
+import { isNovelTool, parseToolArguments, PRESET_TOOLS, type NovelToolName } from "@myrix/novel/protocol";
 
 export interface CellCredential { tenantId: string; cellId: string; token: string }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");

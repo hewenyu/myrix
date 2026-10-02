@@ -23,6 +23,23 @@
 
 ---
 
+## 开发质量门禁
+
+模块职责、迁移债与本轮复盘见 [模块边界评审](<docs/reviews/module-boundaries-2026-10.md>)；授权语义见 [ADR 0033](<docs/adr/0033-condition-malformed-and-role-partition.md>)。
+
+```bash
+pnpm install --frozen-lockfile
+pnpm lint                 # Oxlint + TypeScript 源码级模块边界（含 type-only 导入）
+pnpm typecheck
+pnpm test
+pnpm test:ci              # 边界、容器、VPS、认证装配与 profile 工厂回归
+pnpm build:web
+```
+
+[项目 pnpm 配置](<.npmrc>) 将 store/cache/state 固定在 checkout 内；这些目录和 `.cache/` 均被 Git 与镜像构建忽略。
+若测试临时目录也需留在项目内，先 `mkdir -p .cache/tmp`，再以 `TMPDIR="$PWD/.cache/tmp" pnpm test:ci` 等方式运行。
+Go 的项目内缓存与完整验证命令见评审文档。边界检查是架构回归门禁，不是执行沙箱；测试夹具允许显式跨模块组装。
+
 ## 一、三个问题的答案（TL;DR）
 
 ### 1. 权限管控怎么二开？→ 分层治理，与 DSH 权限解耦

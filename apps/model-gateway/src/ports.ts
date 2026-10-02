@@ -11,7 +11,7 @@
  * 判定复用 `@myrix/governance` 的纯函数 `authorizePlatform`，动作是
  * `sessions:send`（读会话、必须 owner + 未撤销 + rev 匹配）与 `models:invoke`。
  */
-import type { PlatformMember, PlatformResource } from "@myrix/governance";
+import type { PlatformMember } from "@myrix/governance";
 
 export interface CellCredentialBinding {
   tenantId: string;
