@@ -13,7 +13,7 @@ export const exceptions = new Map([
   ["apps/bff/src/runtime-recovery.ts -> packages/platform-store/src/repositories/audit", "Move recovery transitions + audit into platform-store use cases (architecture review M2)."],
 ]);
 
-const pure = new Set(["@myrix/contracts", "@myrix/governance", "@myrix/registry"]);
+const pure = new Set(["@myrix/contracts", "@myrix/governance", "@myrix/registry", "@myrix/novel-protocol"]);
 
 export function checkEdge(owner, specifier, target, packages) {
   if (specifier.startsWith("/") || specifier.startsWith("file:") || specifier.startsWith("#")) {
@@ -42,10 +42,8 @@ export function checkEdge(owner, specifier, target, packages) {
   if (name !== owner.name && owner.directory.startsWith("apps/") && dependency.directory.startsWith("apps/")) {
     return "applications communicate through ports/protocols, not implementation imports";
   }
-  // Temporary protocol ownership: BFF uses only this existing dependency-free subpath,
-  // never the Cordis plugin entry. Extract it into a protocol package in M1.
-  if (owner.directory.startsWith("apps/") && dependency.directory.startsWith("plugins/") &&
-      !(owner.name === "@myrix/bff" && specifier === "@myrix/novel/protocol")) {
+  // Even a dependency-free plugin subpath installs the entire plugin closure.
+  if (owner.directory.startsWith("apps/") && dependency.directory.startsWith("plugins/")) {
     return "applications must not load Cordis plugin implementations";
   }
   const subpath = specifier === name ? "." : `.${specifier.slice(name.length)}`;

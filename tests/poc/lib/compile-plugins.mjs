@@ -21,8 +21,8 @@
  *   * `@deepseek-ai/*` stays **external** and resolves from the locked install
  *     (`$DSH_HOME/profiles/node_modules`), so there is exactly one Cordis
  *     instance and one Agent/Session class identity.
- *   * `@myrix/grant` and `@myrix/principals` are **inlined** from this repo's
- *     sources. They are pure TypeScript libraries with no native or DSH state,
+ *   * `@myrix/grant`, `@myrix/principals`, and `@myrix/novel-protocol` are
+ *     **inlined** from this repo's sources. They are pure TypeScript libraries with no native or DSH state,
  *     so inlining them cannot duplicate a Cordis service — unlike bundling a
  *     plugin package, which would mint a second `Context` class.
  *
@@ -66,6 +66,7 @@ export const CELL_PLUGINS = Object.freeze([
 export const INLINE_ALIASES = Object.freeze({
   '@myrix/grant': 'packages/grant/src/index.ts',
   '@myrix/principals': 'plugins/myrix-principals/src/index.ts',
+  '@myrix/novel-protocol': 'packages/novel-protocol/src/index.ts',
 })
 
 /**
@@ -149,9 +150,12 @@ export function compileCellPlugins(options) {
       }
       const outFile = bundlePathFor(outDir, unit.name)
       const args = esbuildArgs({ repo, outFile })
-      // `@myrix/grant` (packages/grant) is inlined into the driver, so its
-      // sources participate in the freshness decision too.
-      const inputs = [...collectTree(join(repo, 'plugins', entry.pak, 'src')), ...collectTree(join(repo, 'packages', 'grant', 'src'))]
+      // Every explicitly inlined workspace source participates in freshness,
+      // including the shared protocol whose plugin-side file is only a re-export.
+      const inputs = [
+        ...collectTree(join(repo, 'plugins', entry.pak, 'src')),
+        ...Object.values(INLINE_ALIASES).flatMap((source) => collectTree(resolve(repo, source, '..'))),
+      ]
       if (!fresh && isFresh({ outFile, inputs, args })) {
         reused.push(unit.name)
       } else {

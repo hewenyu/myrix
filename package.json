@@ -17,7 +17,7 @@
     "submodule:sync": "git submodule update --remote vendor/deepseek-harness",
     "lint": "oxlint packages plugins apps scripts tests *.ts && pnpm check:boundaries",
     "check:boundaries": "node scripts/check-boundaries.mjs",
-    "test:ci": "node --test tests/ci/*.test.mjs tests/containers/*.test.mjs tests/vps/*.test.mjs tests/auth-deploy/*.test.mjs tests/poc/tests/factory.test.mjs",
+    "test:ci": "node --test tests/ci/*.test.mjs tests/containers/*.test.mjs tests/vps/*.test.mjs tests/auth-deploy/*.test.mjs tests/poc/tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json && pnpm --filter @myrix/novel-web typecheck",
     "test": "vitest run && pnpm --filter @myrix/novel-web test",
     "build:web": "pnpm --filter @myrix/novel-web build",

@@ -21,6 +21,7 @@
     "@deepseek-ai/dsh-agent-preset-registry": "0.2.0-rc.2",
     "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@myrix/novel-protocol": "workspace:*",
     "@myrix/principals": "workspace:*"
   },
   "devDependencies": {

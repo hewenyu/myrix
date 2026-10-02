@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const workflow = readFileSync(new URL('../../.github/workflows/docker.yml', import.meta.url), 'utf8');
-const verify = workflow.split('\n  verify:\n')[1]?.split('\n  images:\n')[0];
+const verify = workflow.split('\n  verify:\n')[1]?.split('\n  build-check:\n')[0];
+const buildCheck = workflow.split('\n  build-check:\n')[1]?.split('\n  images:\n')[0];
 const images = workflow.split('\n  images:\n')[1];
 
 test('publication uses only the declared Docker Hub repository and environment credentials', () => {
@@ -17,6 +18,19 @@ test('publication uses only the declared Docker Hub repository and environment c
   assert.doesNotMatch(workflow, /branches:.*feat|tags: \['v\*'\]/);
   assert.doesNotMatch(verify, /secrets\.|environment: DOCKER/);
   assert.match(images, /needs: verify/);
+});
+
+test('PRs build every release target on both architectures without publication credentials', () => {
+  assert.match(buildCheck, /needs: verify/);
+  assert.match(buildCheck, /if: github\.event_name == 'pull_request'/);
+  assert.match(buildCheck, /platforms: linux\/amd64,linux\/arm64/);
+  assert.match(buildCheck, /push: false/);
+  for (const flag of ['no-cache: true', 'pull: true', 'cache-image: false', 'cache-binary: false']) {
+    assert.ok(buildCheck.includes(flag));
+  }
+  assert.doesNotMatch(buildCheck, /secrets\.|environment:|login-action|push: true/);
+  const targets = job => [...job.matchAll(/- component: (\S+)\n\s+file: (\S+)\n\s+target: (\S+)/g)].map(m => m.slice(1));
+  assert.deepEqual(targets(buildCheck), targets(images));
 });
 
 test('VPS runtime and pre-built login components have distinct tag namespaces', () => {
@@ -55,7 +69,7 @@ test('all external actions are pinned to exact Git commits', () => {
   assert.ok(actions.length >= 8);
   for (const action of actions) assert.match(action, /^[\w-]+\/[\w-]+@[a-f0-9]{40}$/);
   assert.match(workflow, /permissions:\n  contents: read\n/);
-  assert.equal([...workflow.matchAll(/persist-credentials: false/g)].length, 2);
+  assert.equal([...workflow.matchAll(/persist-credentials: false/g)].length, 3);
 });
 
 test('PostgreSQL service health command uses double quotes so the runner parses -U', () => {

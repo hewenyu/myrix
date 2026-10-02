@@ -87,6 +87,53 @@ jobs:
           go test -count=1 ./...
           go vet ./...
 
+  build-check:
+    name: PR build / ${{ matrix.component }} / amd64 + arm64
+    needs: verify
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: bff
+            file: deploy/images/Dockerfile.node
+            target: bff
+          - component: gateway
+            file: deploy/images/Dockerfile.node
+            target: gateway
+          - component: cell
+            file: deploy/images/Dockerfile.node
+            target: cell
+          - component: keycloak
+            file: deploy/images/Dockerfile.keycloak
+            target: keycloak
+    # Build the real release targets before merging, without registry credentials.
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+          cache-image: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          cache-binary: false
+      - name: Build both architectures without publishing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          provenance: mode=min
+          sbom: true
+
   images:
     name: ${{ matrix.component }} / amd64 + arm64
     needs: verify

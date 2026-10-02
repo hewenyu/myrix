@@ -379,6 +379,16 @@ test('the allowlist is derived from the real tool source, never hard-coded', asy
   await assert.rejects(resolveAllowedTools(undefined, join(TMP_ROOT, 'no-such-checkout')), /MYRIX_ALLOWED_TOOLS explicitly/)
 })
 
+test('derived tools need only the pure protocol source, not plugin node_modules', async (t) => {
+  const repo = tempDir(t, 'filtered-closure')
+  const source = join(repo, 'packages', 'novel-protocol', 'src')
+  mkdirSync(source, { recursive: true })
+  cpSync(join(APP_ROOT, 'packages', 'novel-protocol', 'src', 'index.ts'), join(source, 'index.ts'))
+  assert.deepEqual(await resolveAllowedTools(undefined, repo), await resolveAllowedTools(undefined, APP_ROOT))
+  assert.equal(existsSync(join(repo, 'node_modules')), false)
+  assert.equal(existsSync(join(repo, 'plugins')), false)
+})
+
 test('the real factory accepts the resolved options and produces a bootable profile', async (t) => {
   const dir = tempDir(t, 'factory')
   const home = join(dir, 'home')

@@ -15,7 +15,7 @@ test('image contexts exclude private generated state at every supported location
   for (const pattern of [
     '.git', '.team', 'data', 'vendor', '**/node_modules', '**/dist',
     '**/.env', '**/.env.*', '**/secrets', '**/.ssh', '**/.aws', '**/*.pem', '**/*.key',
-    '**/.dsh', '**/.dsh-home', '**/.pnpm-store', '**/.cache',
+    '**/.dsh', '**/.dsh-home', '**/.pnpm-store', '**/.pnpm-cache', '**/.pnpm-state', '**/.cache',
     'deploy/auth/generated', 'deploy/vps/auth', 'deploy/vps/*.env', 'deploy/vps/sql/*.sql',
     '**/*.dump', '**/*.sql.gz', '**/backups', '**/*.tgz', '**/*.tar.gz',
     '**/*.log', '**/.work', '**/.work-*',

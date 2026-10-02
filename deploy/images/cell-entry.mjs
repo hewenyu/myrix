@@ -544,7 +544,7 @@ export function secretValues(config) {
  */
 export async function resolveAllowedTools(explicit, repoRoot) {
   if (explicit !== undefined) return explicit
-  const source = join(repoRoot, 'plugins', 'myrix-novel', 'src', 'protocol.ts')
+  const source = join(repoRoot, 'packages', 'novel-protocol', 'src', 'index.ts')
   if (!existsSync(source)) {
     throw new CellEntryError('myrix-cell-entry: set MYRIX_ALLOWED_TOOLS explicitly; the tool source is not in this image')
   }
