@@ -8,13 +8,15 @@ const contracts = { name: '@myrix/contracts', directory: 'packages/contracts', e
 const store = { name: '@myrix/platform-store', directory: 'packages/platform-store', exports: { '.': './src/index.ts', './internal': null } };
 const novel = { name: '@myrix/novel', directory: 'plugins/myrix-novel', exports: { '.': './src/index.ts', './protocol': './src/protocol.ts' } };
 const gateway = { name: '@myrix/model-gateway', directory: 'apps/model-gateway' };
-const packages = new Map([contracts, store, novel, gateway].map(pkg => [pkg.name, pkg]));
-const bff = { name: '@myrix/bff', directory: 'apps/bff', dependencies: { '@myrix/platform-store': 'workspace:*', '@myrix/novel': 'workspace:*', '@myrix/model-gateway': 'workspace:*' } };
+const protocol = { name: '@myrix/novel-protocol', directory: 'packages/novel-protocol', exports: { '.': './src/index.ts' } };
+const packages = new Map([contracts, store, novel, protocol, gateway].map(pkg => [pkg.name, pkg]));
+const bff = { name: '@myrix/bff', directory: 'apps/bff', dependencies: { '@myrix/platform-store': 'workspace:*', '@myrix/novel': 'workspace:*', '@myrix/novel-protocol': 'workspace:*', '@myrix/model-gateway': 'workspace:*' } };
 const check = (owner, specifier, target = '') => checkEdge(owner, specifier, target, packages);
 
-test('public exports and the precise BFF protocol seam are allowed', () => {
+test('public exports and the standalone BFF protocol are allowed', () => {
   assert.equal(check(bff, '@myrix/platform-store'), undefined);
-  assert.equal(check(bff, '@myrix/novel/protocol'), undefined);
+  assert.equal(check(bff, '@myrix/novel-protocol'), undefined);
+  assert.match(check(bff, '@myrix/novel/protocol'), /Cordis/);
   assert.equal(check(bff, './local', 'apps/bff/src/local'), undefined);
 });
 

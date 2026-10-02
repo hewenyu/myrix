@@ -70,7 +70,7 @@ BFF 与 works 是两个 Fastify 实例/端口，由同一生产装配进程启�
 
 | 迁移债 | 当前限定 | 下一步与完成标准 |
 | --- | --- | --- |
-| **M1：协议归属** | BFF 仅可引用 `@myrix/novel/protocol`，不可加载插件入口 | 抽独立协议包（含工具参数解析实现，不能直接塞进 types-only contracts），由 BFF/plugin 共同依赖；删除特例后门禁仍通过 |
+| **M1：协议归属（后续打包修复已完成）** | BFF/plugin 共同依赖无外部依赖的 `@myrix/novel-protocol`；原插件子路径仅兼容重导出 | 已删除 apps→plugins 特例；补安装依赖闭包回归与 PR 双架构真实构建。只引用子路径也会安装整个插件闭包，不能作为运行时隔离依据 |
 | **M2：事务用例归属** | 仅 [runtime-router](../../apps/bff/src/runtime-router.ts) 与 [runtime-recovery](../../apps/bff/src/runtime-recovery.ts) 可深导入 `insertAuditEvent` | 将 delivery/recovery transition + audit 作为 platform-store 用例，在同一事务中提交；补原子性集成测试并删除两条例外 |
 
 M2 不能简单替换成另开事务的 `AuditRepository.write`，否则业务状态与审计会失去原子性。

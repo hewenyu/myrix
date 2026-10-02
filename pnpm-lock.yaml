@@ -59,9 +59,9 @@ importers:
       '@myrix/grant':
         specifier: workspace:*
         version: link:../../packages/grant
-      '@myrix/novel':
+      '@myrix/novel-protocol':
         specifier: workspace:*
-        version: link:../../plugins/myrix-novel
+        version: link:../../packages/novel-protocol
       '@myrix/platform-store':
         specifier: workspace:*
         version: link:../../packages/platform-store
@@ -227,6 +227,8 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
+  packages/novel-protocol: {}
+
   packages/platform-store:
     dependencies:
       '@myrix/governance':
@@ -325,6 +327,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 0.2.0-rc.2
         version: 0.2.0-rc.2(c6e351a6a6cfd1c2a664558bffcd410d)
+      '@myrix/novel-protocol':
+        specifier: workspace:*
+        version: link:../../packages/novel-protocol
       '@myrix/principals':
         specifier: workspace:*
         version: link:../myrix-principals

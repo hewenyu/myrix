@@ -62,7 +62,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts \
       --filter "@myrix/bff..." \
       --filter "@myrix/model-gateway..." \
       --filter "@myrix/novel-web..." \
- && rm -rf /root/.cache /root/.local/share/pnpm/store
+ && rm -rf /app/.pnpm-store /app/.pnpm-cache /app/.pnpm-state /root/.cache /root/.local/share/pnpm/store
 # Fail the build if DSH ever leaks into the shared service closure, and prove
 # the esbuild the Cell compiler resolves is present and executable.
 RUN test ! -e /app/node_modules/@deepseek-ai \
@@ -100,7 +100,7 @@ FROM deps AS cell
 # `--ignore-scripts` is intentionally NOT used: this mirrors the CI install of the
 # locked install exactly.
 RUN pnpm --dir tests/poc/.dsh-install install --frozen-lockfile \
- && rm -rf /root/.cache /root/.local/share/pnpm/store
+ && rm -rf /app/.pnpm-store /app/.pnpm-cache /app/.pnpm-state /root/.cache /root/.local/share/pnpm/store
 # The locked CLI and its MIT LICENSE must both be present.
 RUN test -x /app/tests/poc/.dsh-install/node_modules/@deepseek-ai/dsh/lib/bin.js \
  && test -f /app/tests/poc/.dsh-install/node_modules/@deepseek-ai/dsh/LICENSE

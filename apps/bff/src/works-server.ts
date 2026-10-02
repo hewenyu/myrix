@@ -6,7 +6,7 @@ import type { PlatformIdentity } from "@myrix/contracts";
 import type { PlatformStore } from "@myrix/platform-store";
 import { ApiFailure } from "./ports";
 import { PostgresNovelRepository, TransactionBoundStore, throwApiError } from "./novel-store";
-import { isNovelTool, parseToolArguments, PRESET_TOOLS, type NovelToolName } from "@myrix/novel/protocol";
+import { isNovelTool, parseToolArguments, PRESET_TOOLS, type NovelToolName } from "@myrix/novel-protocol";
 
 export interface CellCredential { tenantId: string; cellId: string; token: string }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");

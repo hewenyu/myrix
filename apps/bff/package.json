@@ -10,7 +10,7 @@
     "@myrix/contracts": "workspace:*",
     "@myrix/governance": "workspace:*",
     "@myrix/grant": "workspace:*",
-    "@myrix/novel": "workspace:*",
+    "@myrix/novel-protocol": "workspace:*",
     "@myrix/platform-store": "workspace:*",
     "@fastify/cookie": "^11.0.2",
     "@fastify/static": "^8.2.0",
