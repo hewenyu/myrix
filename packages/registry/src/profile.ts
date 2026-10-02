@@ -15,11 +15,14 @@ export interface ProfileSpec {
  * 由授权结果生成 DSH profile 的中间表示。
  * 落盘格式（cordis.patch.yml / bundle 清单）在 docs/integration/dsh-seams.md
  * 与 DSH 的真实 schema 对齐后由 renderer 负责，这里保持与 DSH 版本解耦。
+ *
+ * 时钟：`now` 必填且由调用方注入（装配层传 `() => new Date()`），
+ * 本模块不读系统时钟，`generatedAt` 因此可复放、可断言。
  */
 export function buildProfileSpec(
   entitlement: EntitlementSet,
   catalog: PluginCatalog,
-  options: { profile: string; policyRevision: string; now?: () => Date },
+  options: { profile: string; policyRevision: string; now: () => Date },
 ): ProfileSpec {
   const reasonOf = new Map(entitlement.decisions.map((decision) => [decision.pluginId, decision.reason]));
   return {
@@ -27,7 +30,7 @@ export function buildProfileSpec(
     principalId: entitlement.principalId,
     tenantId: entitlement.tenantId,
     policyRevision: options.policyRevision,
-    generatedAt: (options.now?.() ?? new Date()).toISOString(),
+    generatedAt: options.now().toISOString(),
     enabled: entitlement.enabled.map((id) => {
       const plugin = catalog.get(id);
       return plugin?.source === undefined ? { id } : { id, source: plugin.source };

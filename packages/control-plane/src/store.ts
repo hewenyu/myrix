@@ -220,6 +220,8 @@ export class GovernanceStore {
       roleIds: resolved.roles,
       deniedPluginIds: pluginDenies,
       platformCapabilities: PLATFORM_CAPABILITIES,
+      // 装配层注入时钟：registry 保持纯函数，过期判定与 profile.generatedAt 可复放
+      now: () => this.clock(),
     });
   }
 
@@ -229,6 +231,7 @@ export class GovernanceStore {
     const spec = buildProfileSpec(entitlement, this.catalog, {
       profile: "enterprise",
       policyRevision: this.policyRevision,
+      now: () => this.clock(),
     });
     return { spec, yaml: renderProfilePatch(spec) };
   }
