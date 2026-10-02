@@ -5,7 +5,7 @@ import { DEFAULT_LIMITS, type GatewayConfig } from "../src/config";
 import { ModelGateway } from "../src/gateway";
 import { MemoryLedger } from "../src/ledger";
 import { createModelGatewayServer } from "../src/server";
-import { FakeUpstream, jsonResponse, responseBody, sse, sseResponse } from "./fakes";
+import { FakeUpstream, hangingSseResponse, jsonResponse, responseBody, sse, sseResponse } from "./fakes";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
 const USER = "22222222-2222-4222-8222-222222222222";
@@ -18,7 +18,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
-async function setup(options: { handler: ConstructorParameters<typeof FakeUpstream>[0]["handler"]; configured?: boolean; bodyLimitBytes?: number }) {
+async function setup(options: { handler: ConstructorParameters<typeof FakeUpstream>[0]["handler"]; configured?: boolean; bodyLimitBytes?: number; upstreamTimeoutMs?: number }) {
   const upstream = new FakeUpstream({ handler: options.handler, ...(options.configured === undefined ? {} : { configured: options.configured }) });
   const store = new MemoryAuthorizerStore({
     credentials: { [TOKEN]: { tenantId: TENANT, cellId: "cell-http" } },
@@ -30,7 +30,7 @@ async function setup(options: { handler: ConstructorParameters<typeof FakeUpstre
     port: 0,
     upstream: { url: "https://upstream.invalid/v1/responses", model: "deepseek-chat", apiKey: "sk-test" },
     modelAllowlist: ["deepseek-chat"],
-    limits: { ...DEFAULT_LIMITS, revokePollMs: 50 },
+    limits: { ...DEFAULT_LIMITS, revokePollMs: 50, upstreamTimeoutMs: options.upstreamTimeoutMs ?? DEFAULT_LIMITS.upstreamTimeoutMs },
     credentialSource: "port",
     envCredentials: {},
   };
@@ -47,6 +47,28 @@ const headers = { authorization: `Bearer ${TOKEN}`, "x-myrix-session": SESSION, 
 const responses = { model: "deepseek-chat", input: [{ role: "user", content: [{ type: "input_text", text: "写一段小说" }] }] };
 
 describe("HTTP 边界（OpenAI Responses）", () => {
+  it.each([
+    ["event: response.output_text.delta\ndata: not-json\n\n", "upstream_protocol_error"],
+    ["event: error\ndata: {\"message\":\"private upstream secret\"}\n\n", "upstream_error"],
+  ])("内部中止仍向正常读者发送脱敏错误帧：%s", async (frame, code) => {
+    const { server, upstream } = await setup({ handler: () => sseResponse([frame]) });
+    const response = await server.inject({ method: "POST", url: "/v1/responses", headers, payload: { ...responses, stream: true } });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("event: error");
+    expect(response.body).toContain(code);
+    expect(response.body).not.toContain("private upstream secret");
+    expect(upstream.calls[0]?.aborted).toBe(true);
+  });
+
+  it("上游超时后正常读者仍收到终态错误，而不是静默断流", async () => {
+    const { server } = await setup({
+      upstreamTimeoutMs: 30,
+      handler: ({ signal }) => hangingSseResponse([sse.created()], signal).response,
+    });
+    const response = await server.inject({ method: "POST", url: "/v1/responses", headers, payload: { ...responses, stream: true } });
+    expect(response.body).toContain("upstream_timeout");
+  });
+
   it("缺上游密钥 → 503 且响应体是 OpenAI 错误形状", async () => {
     const { server } = await setup({ handler: () => jsonResponse({}), configured: false });
     const response = await server.inject({ method: "POST", url: "/v1/responses", headers, payload: responses });
