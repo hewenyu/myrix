@@ -43,6 +43,8 @@ data
 **/.dsh
 **/.dsh-home
 **/.pnpm-store
+**/.pnpm-cache
+**/.pnpm-state
 **/.cache
 # Compose initialization creates private files that Git ignores; Docker does not
 # read .gitignore, so explicitly exclude every generated deployment location.

@@ -1,5 +1,9 @@
 # deps / build
 node_modules/
+.pnpm-store/
+.pnpm-cache/
+.pnpm-state/
+.cache/
 dist/
 build/
 coverage/

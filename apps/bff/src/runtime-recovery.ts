@@ -53,7 +53,7 @@
  *   * 撤权、成员停用、rev 变化、非所有者一律拒绝恢复（enqueue 在它自己的事务里重取
  *     权威事实，调用方读到的旧事实不能替代它）。
  *
- * 写入边界：本文件只读 `@myrix/platform-store` 的公开契约与 `runtime-log`，
+ * 写入边界：除同事务审计的已登记迁移例外外，使用 `@myrix/platform-store` 公开契约与 `runtime-log`，
  * 不新增表/迁移，也不改 driver 或授权实现。
  */
 import { createHash } from "node:crypto";

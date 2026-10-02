@@ -16,7 +16,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentHandle, AgentSetup, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentSetup, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 // 类型侧导入：只为拉入 webserver 与 preset-registry 对 Context 的模块增强。
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -29,7 +29,6 @@ import {
   type AgentPort,
   type PersistedUserMessagePort,
   type RuntimePorts,
-  type SessionPort,
 } from './controller'
 import { EventHub } from './events'
 import { createRouter, type AdminAuth, type Router } from './router'

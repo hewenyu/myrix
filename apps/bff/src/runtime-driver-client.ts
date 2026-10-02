@@ -395,6 +395,7 @@ export function createDriverHttpClient(options: DriverHttpClientOptions = {}): D
           if (typeof ready !== "boolean" || typeof draining !== "boolean") return undefined;
           const reason = record["reason"];
           // driver 自述的就绪原因：去掉控制字符并截断，避免上游文本被原样带进日志/响应。
+          // oxlint-disable-next-line no-control-regex -- 这里的匹配对象就是控制字符本身：这是安全过滤，不是笔误。
           const safeReason = typeof reason === "string" ? reason.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120) : undefined;
           return { ready, bootId, draining, ...(safeReason === undefined || safeReason.length === 0 ? {} : { reason: safeReason }) };
         },
@@ -574,7 +575,7 @@ export function createDriverHttpClient(options: DriverHttpClientOptions = {}): D
             },
           },
         };
-      } catch (error) {
+      } catch {
         const outcome = handle.fired() !== undefined
           ? abortOutcome(handle)
           : unreachableFailure();

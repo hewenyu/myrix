@@ -239,6 +239,7 @@ describe("AssistantPanel", () => {
 
     const ended = renderPanel({ stream: { turnOutcome: "session-ended", turnOutcomeReason: "会话状态变为 revoked" } });
     expect(screen.getByText(/会话已结束：会话状态变为 revoked/)).toBeDefined();
+    ended.unmount();
   });
 
   it("回合状态通过 data 属性暴露：进行中不是完成", () => {

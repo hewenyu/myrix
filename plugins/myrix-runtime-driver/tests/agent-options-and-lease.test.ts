@@ -103,7 +103,7 @@ describe('provider/model 必须真正传给 agents.create/resume', () => {
 describe('refreshIdentity：bindingLease.refresh() 永不抛出，必须检查 installed', () => {
   it('installed:true → 正常返回（刷新真的安装了新快照）', async () => {
     const refresh = vi.fn(() => Promise.resolve({ installed: true, bindings: 3 }))
-    const { ctx, captured } = fakeCtx({ lease: { refresh } })
+    const { ctx } = fakeCtx({ lease: { refresh } })
     const ports = __createPorts(ctx, AGENT_OPTIONS)
     await expect(ports.refreshIdentity?.({ sid: 'sid-1', tid: 't', sub: 'u', wid: 'w', preset: 'p', rev: 1 })).resolves.toBeUndefined()
     expect(refresh).toHaveBeenCalledTimes(1)

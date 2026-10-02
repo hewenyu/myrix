@@ -67,6 +67,8 @@ jobs:
           SQL
           MYRIX_MIGRATE_DATABASE_URL="$MYRIX_TEST_DATABASE_URL" pnpm --filter @myrix/platform-store migrate
           MYRIX_MIGRATE_DATABASE_URL="$BFF_TEST_MIGRATION_DATABASE_URL" pnpm --filter @myrix/platform-store migrate
+      - name: Lint and module boundaries
+        run: pnpm lint
       - name: Typecheck and PostgreSQL-backed tests
         run: |
           pnpm typecheck

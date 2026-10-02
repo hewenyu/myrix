@@ -43,7 +43,7 @@ import { join } from 'node:path'
 import { compileWorkspaceLibs } from './lib/compile-plugins.mjs'
 import { createCellProfile, cellEnv } from './lib/cell-profile.mjs'
 import { createCellIssuer, createControlPlaneClient, newCommandId } from './lib/cell-client.mjs'
-import { resolveDshInstall, resolveRepoRoot } from './lib/dsh-install.mjs'
+import { resolveRepoRoot } from './lib/dsh-install.mjs'
 import { startModelGatewayStub, startWorksStub } from './lib/stubs.mjs'
 
 const HERE = new URL('.', import.meta.url).pathname
@@ -337,8 +337,6 @@ async function main() {
     cells[id].linkBundle()
   }
   registerProbeBinding(runId)
-  /** Each boot's probe report needs a unique path; both are kept for the report. */
-  const probeReports = {}
   const processes = Object.fromEntries(CELL_IDS.map((id) => [id, new CellProcess(cells[id], id)]))
 
   // One control-plane issuer per Cell: the `jti` store is per signing process,

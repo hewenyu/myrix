@@ -40,10 +40,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { PrincipalRegistry } from '@myrix/principals'
 import { NovelStoreClient } from './client.ts'
 import { PRESET_TOOLS } from './protocol.ts'
-import { NOVEL_PRESETS, PRESET_TOOLS_PLUGIN, novelPresetDefinitions } from './presets.ts'
+import { NOVEL_PRESETS, novelPresetDefinitions } from './presets.ts'
 import { assertKnownTools } from './tools.ts'
 import type { NovelStoreService } from './service.ts'
 
@@ -98,7 +97,6 @@ const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolved = resolveConfig(config)
-  const principals = ctx.principals as PrincipalRegistry
 
   // 服务先于 preset 注册：preset 子插件的 `inject` 里就有 `novelStore`，
   // 若先注册 preset，子行会停在 pending 直到服务出现。

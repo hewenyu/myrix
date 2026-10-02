@@ -10,7 +10,6 @@
  * @module tests/plugin.test
  */
 import { describe, expect, it } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
 import type { Principal } from '@myrix/principals'
 import { apply as applyNovel } from '../src/index.ts'
 import { PRESET_TOOLS } from '../src/protocol.ts'

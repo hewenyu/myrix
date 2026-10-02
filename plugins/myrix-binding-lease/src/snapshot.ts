@@ -50,7 +50,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function shortString(value: unknown, field: string): string | undefined {
+function shortString(value: unknown, _field: string): string | undefined {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_FIELD_LENGTH) return undefined
   return value
 }

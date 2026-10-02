@@ -361,7 +361,8 @@ describe('send：messageId = commandId 与 flush 语义', () => {
     await h.sendCommand({ op: 'send', sid: SID, commandId: 'c2', body: { text: '写一个开头' } })
     const events = h.runtime.sessions.get(SID)?.events ?? []
     const userEvent = events.find((e) => e.type === 'user/message')
-    expect((userEvent?.data as { id?: string }).id).toBe('c2')
+    expect(userEvent).toBeDefined()
+    expect((userEvent!.data as { id?: string }).id).toBe('c2')
   })
 
   it('messageId 与 commandId 不同时一律 400（不让 caller 躲过对账）', async () => {
@@ -381,7 +382,8 @@ describe('send：messageId = commandId 与 flush 语义', () => {
     await h.sendCommand({ op: 'send', sid: SID, commandId: 'c2', body: { text: 'hi', messageId: 'c2' } })
     const events = h.runtime.sessions.get(SID)?.events ?? []
     const userEvent = events.find((e) => e.type === 'user/message')
-    expect((userEvent?.data as { id?: string }).id).toBe('c2')
+    expect(userEvent).toBeDefined()
+    expect((userEvent!.data as { id?: string }).id).toBe('c2')
   })
 
   it('未打开的会话上 send 被拒绝（不会隐式创建）', async () => {
@@ -599,8 +601,9 @@ describe('排空：空闲证明', () => {
     const h = harness()
     await h.sendCommand({ op: 'create', sid: SID, commandId: 'c1' })
     const agent = h.runtime.agents.get(SID)
+    expect(agent).toBeDefined()
     // 手工塞一条未处理消息，模拟"还有工作没消费"。
-    ;(agent?.inbox.nextTurn as unknown[]).push({ id: 'pending' })
+    ;(agent!.inbox.nextTurn as unknown[]).push({ id: 'pending' })
     const result = await h.controller.drain()
     expect(result.drained).toBe(false)
     expect(result.reason).toContain('inbox')

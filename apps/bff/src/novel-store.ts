@@ -1,11 +1,9 @@
 import type { BibleEntry, Chapter, NovelSession, PlatformIdentity, SaveResult } from "@myrix/contracts";
-import { PlatformStore, type StoreTx, type TenantContextInput } from "../../../packages/platform-store/src/store";
-import { PlatformStoreError } from "../../../packages/platform-store/src/errors";
-import { WorksRepository } from "../../../packages/platform-store/src/repositories/works";
-import { ChaptersRepository } from "../../../packages/platform-store/src/repositories/chapters";
-import { OutlineRepository } from "../../../packages/platform-store/src/repositories/outline";
-import { BibleRepository, type BibleEntryRecord } from "../../../packages/platform-store/src/repositories/bible";
-import { SessionsRepository, type SessionBindingRecord } from "../../../packages/platform-store/src/repositories/bindings";
+import {
+  PlatformStore, PlatformStoreError, WorksRepository, ChaptersRepository,
+  OutlineRepository, BibleRepository, SessionsRepository,
+  type StoreTx, type TenantContextInput, type BibleEntryRecord, type SessionBindingRecord,
+} from "@myrix/platform-store";
 import { ApiFailure, type DraftInput, type NovelRepository } from "./ports";
 
 /** Reuses a single RLS transaction for nested ownership checks and writes; never opens a second pool lease. */

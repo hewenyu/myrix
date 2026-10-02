@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@myrix/governance": "workspace:*",
+    "@myrix/platform-store": "workspace:*",
     "fastify": "^5.6.0",
     "kysely": "^0.28.5",
     "pg": "^8.16.3"

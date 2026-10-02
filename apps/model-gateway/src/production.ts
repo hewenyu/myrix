@@ -1,8 +1,6 @@
 import { Kysely, PostgresDialect } from "kysely";
 import pg from "pg";
-import { PlatformStore } from "../../../packages/platform-store/src/store";
-import { assertRuntimeDatabase } from "../../../packages/platform-store/src/runtime-db";
-import type { PlatformDatabase } from "../../../packages/platform-store/src/schema";
+import { PlatformStore, assertRuntimeDatabase, type PlatformDatabase } from "@myrix/platform-store";
 import { createGatewayBusinessReaders } from "./business-reader";
 import { createPortFromReaders, createPostgresCredentialResolver } from "./db/credentials";
 import { createPostgresLedger } from "./db/ledger";

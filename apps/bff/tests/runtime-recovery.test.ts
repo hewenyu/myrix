@@ -62,7 +62,7 @@ import {
   resumeBodyOf,
   RuntimeSessionRecovery,
 } from "../src/runtime-recovery";
-import { SessionController, type ControllerHost, type RuntimePorts } from "../../../plugins/myrix-runtime-driver/src/controller";
+import { SessionController, type ControllerHost } from "../../../plugins/myrix-runtime-driver/src/controller";
 import { EventHub } from "../../../plugins/myrix-runtime-driver/src/events";
 import { createRouter } from "../../../plugins/myrix-runtime-driver/src/router";
 import type { StreamEvent } from "../../../plugins/myrix-runtime-driver/src/types";
@@ -1105,7 +1105,6 @@ describe.skipIf(!appUrl || !migrationUrl)("BFF session recovery against real Pos
     // 撤权（一个**真实的**、明确的授权拒绝）：绑定 revoked + rev 前进。
     // 这既不是 boot 不匹配，也不是 driver 的 session_not_open/identity_invalid，
     // 因此必须按原分类永久失败，绝不生成 resume。
-    const sendCommandId = randomUUID();
     await migration.updateTable("session_bindings")
       .set({ status: "revoked", revoked_at: new Date(), revoked_revision: 2 })
       .where("id", "=", session.id).execute();
@@ -1680,7 +1679,9 @@ describe.skipIf(!appUrl || !migrationUrl)("BFF session recovery against real Pos
     // driver 以 403 identity_invalid 拒绝 —— 走的是**反应式**分支。
     const revived = await startCell({ cellId: fx.cellId, bootId: "boot-A", tenantId: fx.tenantId, disk: fx.disk });
     cells.push(revived);
-    const runtime = makeRuntime({ store: fx.driverStore, cell: revived, tenantId: fx.tenantId, workerId: "worker-reactive", serviceToken: fx.serviceToken });
+    // 该 runtime 只用于覆盖"同 boot 的另一个 worker 先打开过会话"的装配路径；
+    // 本用例随后用 exhaustedRuntime 断言，故不持有其返回值。
+    makeRuntime({ store: fx.driverStore, cell: revived, tenantId: fx.tenantId, workerId: "worker-reactive", serviceToken: fx.serviceToken });
 
     // 反应式分支 + exhausted：预占该 boot 的唯一 attempt。
     await seedSucceededResume(fx, seeded.sid, fx.owner.userId, { bootId: "boot-A", attempt: 0, settledAt: new Date(Date.now() - 3_600_000) });

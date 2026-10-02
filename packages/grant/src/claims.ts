@@ -67,6 +67,7 @@ export const KNOWN_CLAIMS: ReadonlySet<string> = new Set(CLAIM_SPECS.map((spec) 
 
 const MAX_IDENTIFIER_LENGTH = 128;
 const MAX_STRING_LENGTH = 128;
+// oxlint-disable-next-line no-control-regex -- 该正则就是控制字符黑名单本身：标识符安全过滤（fail-closed），不是笔误。
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 const DOT_FREE_IDENTIFIERS = new Set(["sid", "sub", "wid", "cmd", "jti"]);
 

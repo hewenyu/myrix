@@ -327,11 +327,9 @@ async function renderEntitlement() {
 async function renderKnowledge() {
   const query = h("input", { value: "年假", size: 24 });
   const result = h("div");
-  let bases = [];
 
   async function load() {
     const payload = await api("/api/v1/knowledge/bases?principalId=" + encodeURIComponent(state.selectedPrincipal));
-    bases = payload.bases;
     return payload;
   }
 
