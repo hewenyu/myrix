@@ -6,6 +6,11 @@
  * - `origin` 必须是显式 HTTPS，或显式回环 HTTP。`http://works.internal` 这类
  *   内网明文地址**必须**写成 HTTPS；只有 `127.0.0.1`/`[::1]`/`localhost`
  *   允许明文，供同 Pod sidecar 或本地集成使用。
+ * - 唯一例外是 `internalHttpOrigins`：装配方可以**逐项声明**同机 Docker
+ *   服务名 + 端口的规范 HTTP origin（ADR 0030）。默认空列表 = 关闭；声明项
+ *   无论本次是否用到都全部校验，且必须是规范 origin（不含凭据/路径/查询/
+ *   fragment），只接受单标签 Docker 服务名。这不是"明文总开关"，也不放宽
+ *   对外 HTTPS 要求。
  * - `token` 只能来自 Config（部署 Secret 注入），不接受环境变量回退、
  *   不接受从磁盘读第二份、不写日志。
  * - `ttlMs` 上限硬编码 30 秒；`refreshMs` 必须严格小于 `ttlMs / 2`，
@@ -27,6 +32,8 @@ export const MAX_REQUEST_TIMEOUT_MS = 10_000
 export const MAX_RESPONSE_BYTES_CAP = 1_048_576
 /** 默认响应体字节上限：10,000 行 × ~90 字节 + 元数据，留一倍余量。 */
 export const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576
+/** `internalHttpOrigins` 的最大声明条数（同机 Compose 服务数量级，与容器入口一致）。 */
+export const MAX_INTERNAL_HTTP_ORIGINS = 16
 /** 令牌最小长度：与服务端 `CellCredentialRegistry` 的 32 字符要求一致。 */
 const MIN_TOKEN_LENGTH = 32
 
@@ -38,6 +45,17 @@ export interface Config {
   tenantId: string
   /** 作品服务 origin，例如 `https://works.internal:8443` 或 `http://127.0.0.1:8081`。 */
   origin: string
+  /**
+   * 显式声明的**同机内部 HTTP origin** 白名单（ADR 0030）。
+   *
+   * 只用于单机 Docker Compose 部署：容器入口把
+   * `MYRIX_CELL_INTERNAL_HTTP_ORIGINS` 解析出的精确 origin 原样传下来。默认
+   * `[]` = 关闭，此时非回环明文 HTTP 一律拒绝。每一项都必须是规范 HTTP
+   * origin（`http://<单标签服务名>:<端口>`，无凭据/路径/查询/fragment），
+   * 且**全部**校验——包括本次 `origin` 没有用到的那几项；通配符、公网域名、
+   * IP、多标签域名、非 HTTP 协议一律拒绝。这不是"明文总开关"。
+   */
+  internalHttpOrigins?: readonly string[]
   /**
    * Cell 服务 token（Config 是唯一来源）。
    *
@@ -92,6 +110,8 @@ export interface ResolvedConfig {
   readonly tenantId: string
   /** 规范化后的 origin（含协议与端口，无路径/凭据/查询）。 */
   readonly origin: string
+  /** 通过校验的同机内部 HTTP origin 声明（已去重、已规范化）；默认空数组。 */
+  readonly internalHttpOrigins: readonly string[]
   readonly url: string
   readonly token: string
   readonly ttlMs: number
@@ -112,13 +132,79 @@ export class BindingLeaseConfigError extends Error {
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', '::1', 'localhost'])
 
+/** 单标签 Docker 服务名：小写字母开头，后续小写字母/数字/连字符，最长 63 字符。 */
+const INTERNAL_SERVICE_HOST = /^[a-z][a-z0-9-]{0,62}$/
+
+/**
+ * 校验一条 `internalHttpOrigins` 声明并返回规范化 origin。
+ *
+ * 与容器入口 `parseInternalHttpOrigins` 的语义保持一致：只接受规范 HTTP
+ * origin（`url.origin === raw`），主机必须是单标签 Docker 服务名；凭据、路径
+ * （含结尾 `/`）、查询串、fragment、通配符、IP、多标签域名、其它协议全部拒绝。
+ * 错误信息只描述规则，不回显可能内嵌凭据的原始值。
+ */
+export function normalizeInternalHttpOrigin(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 512) {
+    throw new BindingLeaseConfigError('internalHttpOrigins 的每一项都必须是非空、不超过 512 字符的字符串')
+  }
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new BindingLeaseConfigError('internalHttpOrigins 的每一项都必须是合法 URL')
+  }
+  if (url.protocol !== 'http:') {
+    throw new BindingLeaseConfigError('internalHttpOrigins 只接受 http: 规范 origin（其余协议一律拒绝）')
+  }
+  // 规范 origin：`new URL()` 会把 `user:pass@`、`/path`、`?q`、`#h`、结尾 `/`
+  // 归约掉，因此 `url.origin !== raw` 恰好覆盖"写法不规范/藏了东西"两类输入。
+  if (url.username !== '' || url.password !== '' || url.origin !== raw) {
+    throw new BindingLeaseConfigError(
+      'internalHttpOrigins 的每一项都必须是规范 origin：不得内嵌凭据、路径、查询串或 fragment',
+    )
+  }
+  if (!INTERNAL_SERVICE_HOST.test(url.hostname)) {
+    throw new BindingLeaseConfigError(
+      'internalHttpOrigins 只接受单标签 Docker 服务名主机（不接受通配符、IP 或多标签域名）',
+    )
+  }
+  return url.origin
+}
+
+/**
+ * 校验整个 `internalHttpOrigins` 列表（fail-closed，且即使一项没被用到也校验）。
+ *
+ * @param value - 配置里的原始值；`undefined` 表示关闭（返回空数组）。
+ * @returns 去重后的规范化 origin 列表。
+ * @throws {BindingLeaseConfigError} 当它不是字符串数组、超长或任一项非法时。
+ */
+export function resolveInternalHttpOrigins(value: unknown): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    throw new BindingLeaseConfigError('internalHttpOrigins 必须是字符串数组')
+  }
+  if (value.length > MAX_INTERNAL_HTTP_ORIGINS) {
+    throw new BindingLeaseConfigError(`internalHttpOrigins 最多 ${MAX_INTERNAL_HTTP_ORIGINS} 项`)
+  }
+  const normalized: string[] = []
+  for (const entry of value) {
+    const origin = normalizeInternalHttpOrigin(entry)
+    if (!normalized.includes(origin)) normalized.push(origin)
+  }
+  return normalized
+}
+
 /**
  * 校验并规范化 origin。
  *
- * 规则：显式 `https:` 一律可以；`http:` 仅在主机是**显式回环**时允许；
+ * 规则：显式 `https:` 一律可以；`http:` 仅在主机是**显式回环**时允许，
+ * 或在 `internalHttpOrigins` 里被**逐项声明**时允许（ADR 0030）；
  * 其余协议（file/data/ws/…）、带用户名密码、带路径/查询/fragment 的 URL 全部拒绝。
+ *
+ * @param raw - 配置里的 origin。
+ * @param internalHttpOrigins - 已校验的同机内部 HTTP 声明；默认空（只允许回环）。
  */
-export function normalizeOrigin(raw: string): string {
+export function normalizeOrigin(raw: string, internalHttpOrigins: readonly string[] = []): string {
   let url: URL
   try {
     url = new URL(raw)
@@ -136,12 +222,13 @@ export function normalizeOrigin(raw: string): string {
   }
   if (url.protocol === 'https:') return url.origin
   if (url.protocol === 'http:') {
-    if (!LOOPBACK_HOSTS.has(url.hostname)) {
-      throw new BindingLeaseConfigError(
-        `明文 HTTP 只允许显式回环地址（收到 ${url.hostname}）；内网地址必须使用 HTTPS`,
-      )
-    }
-    return url.origin
+    if (LOOPBACK_HOSTS.has(url.hostname)) return url.origin
+    // 端口不匹配、公网域名、IP、通配符都不在声明里；`includes` 是精确匹配，
+    // 因此"声明了 bff:8791 却连 bff:8792"仍然拒绝。
+    if (internalHttpOrigins.includes(url.origin)) return url.origin
+    throw new BindingLeaseConfigError(
+      `明文 HTTP 只允许显式回环地址或已声明的同机内部 origin（收到 ${url.hostname}）；内网地址必须使用 HTTPS`,
+    )
   }
   throw new BindingLeaseConfigError(`origin 协议必须是 https:，或回环 http:（收到 ${url.protocol}）`)
 }
@@ -211,7 +298,10 @@ export function resolveConfig(config: Config | undefined): ResolvedConfig {
   }
   const cellId = requireShortString(config.cellId, 'cellId')
   const tenantId = requireShortString(config.tenantId, 'tenantId')
-  const origin = normalizeOrigin(requireShortString(config.origin, 'origin', 512))
+  // 先把整份声明校验完，再校验本 cell 的 origin：这样"声明里混进一条非法项"
+  // 永远在启动时失败，而不是因为本次没用到就被静默忽略。
+  const internalHttpOrigins = resolveInternalHttpOrigins(config.internalHttpOrigins)
+  const origin = normalizeOrigin(requireShortString(config.origin, 'origin', 512), internalHttpOrigins)
   const token = requireSecret(config.token, 'token')
 
   const ttlMs = config.ttlMs === undefined ? DEFAULT_TTL_MS : safeInt(config.ttlMs, 'ttlMs', 1_000, MAX_TTL_MS)
@@ -250,6 +340,7 @@ export function resolveConfig(config: Config | undefined): ResolvedConfig {
     cellId,
     tenantId,
     origin,
+    internalHttpOrigins,
     url: `${origin}${path}`,
     token,
     ttlMs,

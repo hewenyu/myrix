@@ -28,7 +28,14 @@ import type { Config, GatewayCellTokenResolver } from './types.ts'
 
 export { GatewayAdapter } from './adapter.ts'
 export type { GatewayAdapterOptions } from './adapter.ts'
-export { DEFAULT_PROVIDER, RESPONSES_PATH, resolveConfig } from './config.ts'
+export {
+  DEFAULT_PROVIDER,
+  MAX_INTERNAL_HTTP_ORIGINS,
+  RESPONSES_PATH,
+  normalizeInternalHttpOrigin,
+  resolveConfig,
+  resolveInternalHttpOrigins,
+} from './config.ts'
 export type { ResolvedGatewayConfig } from './config.ts'
 export {
   StreamTranslator,

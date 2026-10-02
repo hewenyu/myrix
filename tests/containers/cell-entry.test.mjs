@@ -184,6 +184,33 @@ test('origins are validated and credentials cannot hide in a URL', () => {
   assert.equal(parseOrigin('https://works.example.internal', 'X'), 'https://works.example.internal')
 })
 
+test('the entry validates the whole declaration even when an origin is unused, and forwards it', (t) => {
+  const home = join(tempDir(t, 'declare'), 'home')
+  // A valid HTTPS deployment that declares garbage must still refuse: every entry
+  // is validated, not just the ones this cell happens to use (ADR 0030).
+  const https = { ...baseEnv(home) }
+  for (const value of ['["http://*:1"]', '["http://bff:8791", "http://evil.example:1"]',
+    '["https://bff:8791"]', '["http://bff:8791/x"]']) {
+    assert.throws(
+      () => resolveCellConfig({ ...https, MYRIX_CELL_INTERNAL_HTTP_ORIGINS: value }),
+      /explicit JSON array/,
+      `rejected ${value}`,
+    )
+  }
+  // A canonical declaration is normalized, de-duplicated and carried on the config
+  // so `buildCellOptions` can pass exactly this list to the plugins.
+  const declared = JSON.stringify(['http://bff:8791', 'http://gateway:8790', 'http://bff:8791'])
+  const config = resolveCellConfig({
+    ...https,
+    MYRIX_WORKS_ORIGIN: 'http://bff:8791',
+    MYRIX_GATEWAY_URL: 'http://gateway:8790/v1',
+    MYRIX_CELL_INTERNAL_HTTP_ORIGINS: declared,
+  })
+  assert.deepEqual(config.internalHttpOrigins, ['http://bff:8791', 'http://gateway:8790'])
+  const options = buildCellOptions(config, ['get_outline'])
+  assert.deepEqual(options.internalHttpOrigins, ['http://bff:8791', 'http://gateway:8790'])
+})
+
 test('paths stay inside the writable home and never touch the application root', (t) => {
   const dir = tempDir(t, 'paths')
   const home = join(dir, 'home')
@@ -373,6 +400,32 @@ test('the real factory accepts the resolved options and produces a bootable prof
   assert.equal(childEnv.MYRIX_WORKS_TOKEN, config.secrets.worksToken)
   assert.equal(childEnv.MYRIX_TENANT_ID, 'tenant-t1')
   assert.equal(childEnv.DSH_HOME, resolve(home))
+  // The declaration variable travels to the child verbatim so the generated
+  // `!!js` row evaluates to the same list the entry validated.
+  assert.equal(childEnv.MYRIX_CELL_INTERNAL_HTTP_ORIGINS, '[]')
+})
+
+test('a declared same-host deployment boots through entry → factory → real plugin config', async (t) => {
+  const dir = tempDir(t, 'compose-e2e')
+  const home = join(dir, 'home')
+  const origins = ['http://bff:8791', 'http://gateway:8790']
+  const env = {
+    ...baseEnv(home),
+    MYRIX_WORKS_ORIGIN: 'http://bff:8791',
+    MYRIX_GATEWAY_URL: 'http://gateway:8790/v1',
+    MYRIX_CELL_INTERNAL_HTTP_ORIGINS: JSON.stringify(origins),
+  }
+  const config = resolveCellConfig(env)
+  const precompiled = compilePluginEntries({ repo: APP_ROOT, outDir: join(home, '.plugins'), fresh: false })
+  const cell = realFactory.createCellProfile({ ...buildCellOptions(config, ['get_outline']), precompiled })
+  // The generated row reads the declaration from the environment, not a literal.
+  const patch = readFileSync(cell.files.patch, 'utf8')
+  assert.match(patch, /internalHttpOrigins: !!js JSON\.parse\(process\.env\.MYRIX_CELL_INTERNAL_HTTP_ORIGINS \?\? '\[\]'\)/)
+  // Both plugin rows carry the declaration (the gateway and the lease).
+  assert.equal((patch.match(/internalHttpOrigins: !!js/g) ?? []).length, 2)
+  // The child environment is what the loader evaluates the row against.
+  const childEnv = childEnvironment(cell, env)
+  assert.equal(childEnv.MYRIX_CELL_INTERNAL_HTTP_ORIGINS, JSON.stringify(origins))
 })
 
 test('the entry spawns the locked CLI with the profile flag and only safe args', async (t) => {

@@ -27,6 +27,12 @@ import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { createCellProfile, cellEnv, resolveProfilePaths } from '../lib/cell-profile.mjs'
+// The real plugin origin contracts. The cross-layer test below loads the generated
+// profile's config and feeds it through these — never a string comparison of the
+// YAML — so "the factory emitted something" and "the plugin accepts it" are the
+// same assertion.
+import { resolveConfig as resolveLeaseConfig } from '../../../plugins/myrix-binding-lease/src/config.ts'
+import { resolveConfig as resolveGatewayConfig } from '../../../plugins/myrix-llm-gateway/src/config.ts'
 import { compilePluginEntries, CELL_PLUGINS } from '../lib/compile-plugins.mjs'
 import { resolveRepoRoot } from '../lib/dsh-install.mjs'
 
@@ -243,4 +249,148 @@ test('resolveProfilePaths keeps the profile beside, never inside, the session st
   // A profile directory that would alias sessions/ is not constructible from a
   // safe name, which is exactly why the name pattern exists.
   assert.throws(() => resolveProfilePaths(home, '../sessions'), /unsafe profile name/)
+})
+
+// ---------------------------------------------------------------------------
+// Cross-layer origin contract (ADR 0030)
+// ---------------------------------------------------------------------------
+
+/**
+ * Load a generated `cordis.patch.yml` the way the real loader does.
+ *
+ * The profile patch is YAML with `!!js` scalars that the loader turns into
+ * expression nodes and later evaluates against `{ process }`
+ * (`@deepseek-ai/cordis-plugin-loader` config/utils.ts: a `!!js` scalar becomes
+ * `{ __jsExpr }`, then `with (ctx) { return eval(expr) }`).
+ *
+ * Reimplementing the *whole* loader here is not the point and would be a test-only
+ * approximation; what this helper must reproduce exactly is the one thing under
+ * test: the config object both plugins actually receive. The expression
+ * evaluator below is byte-identical to the loader's.
+ *
+ * @param {string} patchPath - absolute path to the generated patch.
+ * @param {NodeJS.ProcessEnv} env - the environment the loader would expose; a Cell
+ *   process sees the factory's non-secret variables *and* its credentials
+ *   (`cellEnv` merges `cell.secrets` in), so callers pass both.
+ * @returns {Map<string, object>} row id → evaluated `config` (or `{}`).
+ */
+async function evalProfileConfigs(patchPath, env) {
+  const yaml = await import('../.dsh-install/node_modules/js-yaml/dist/js-yaml.mjs')
+  const JsExpr = new yaml.Type('tag:yaml.org,2002:js', {
+    kind: 'scalar',
+    resolve: (data) => typeof data === 'string',
+    construct: (data) => ({ __jsExpr: data }),
+  })
+  const evaluate = new Function('ctx', 'expr', 'with (ctx) { return eval(expr) }')
+  const doc = yaml.load(readFileSync(patchPath, 'utf8'), { schema: yaml.DEFAULT_SCHEMA.extend([JsExpr]) })
+  const rows = (doc?.[0]?.insert ?? [])
+  const configs = new Map()
+  for (const row of rows) {
+    const config = {}
+    for (const [key, value] of Object.entries(row.config ?? {})) {
+      config[key] = value !== null && typeof value === 'object' && '__jsExpr' in value
+        ? evaluate({ process: { env } }, value.__jsExpr)
+        : value
+    }
+    configs.set(row.id, config)
+  }
+  return configs
+}
+
+/** The minimal `!!js`-free options a cross-layer test needs. */
+function composeCellOptions(home, overrides = {}) {
+  return cellOptions(home, {
+    worksOrigin: 'http://bff:8791',
+    // The gateway config is an origin plus adapter-appended /responses, never a
+    // full endpoint; passing one would fail the real resolveConfig below.
+    gatewayBaseURL: 'http://gateway:8790/v1',
+    ...overrides,
+  })
+}
+
+test('generated Cell config is accepted by the REAL plugin resolveConfig functions', async (t) => {
+  const home = tempDir(t)
+  const approved = ['http://bff:8791', 'http://gateway:8790']
+  const cell = createCellProfile(composeCellOptions(home, { internalHttpOrigins: approved }))
+  const configs = await evalProfileConfigs(cell.files.patch, cellEnv(cell))
+  const lease = configs.get('myrix-binding-lease')
+  const gateway = configs.get('myrix-llm-gateway')
+  assert.ok(lease, 'the profile must declare the binding lease row')
+  assert.ok(gateway, 'the profile must declare the gateway row')
+  // The factory forwarded the declarations as an actual array, not a string.
+  assert.deepEqual(lease.internalHttpOrigins, approved)
+  assert.deepEqual(gateway.internalHttpOrigins, approved)
+  // The REAL parsers accept the generated config: no string matching.
+  const leaseResolved = resolveLeaseConfig({ ...lease, token: 'works-token-0123456789abcdef0123456789' })
+  const gatewayResolved = resolveGatewayConfig({ ...gateway, cellToken: 'gateway-token-0123456789abcdef0123456789' }, () => 'gateway-token-0123456789abcdef0123456789')
+  assert.equal(leaseResolved.origin, 'http://bff:8791')
+  assert.equal(gatewayResolved.baseURL, 'http://gateway:8790/v1')
+  // Preserved: Responses-only endpoint construction, no chat/completions fallback.
+  assert.equal(gatewayResolved.endpoint, 'http://gateway:8790/v1/responses')
+})
+
+test('the generated config is DENIED by the real plugins when the declaration is absent or wrong', async (t) => {
+  // (a) No declaration at all: the same Compose origins must fail activation.
+  const undeclaredHome = tempDir(t)
+  const undeclared = createCellProfile(composeCellOptions(undeclaredHome))
+  const undeclaredConfigs = await evalProfileConfigs(undeclared.files.patch, cellEnv(undeclared))
+  const undeclaredLease = undeclaredConfigs.get('myrix-binding-lease')
+  assert.deepEqual(undeclaredLease.internalHttpOrigins, [])
+  assert.throws(
+    () => resolveLeaseConfig({ ...undeclaredLease, token: 'works-token-0123456789abcdef0123456789' }),
+    /回环/,
+  )
+  assert.throws(
+    () => resolveGatewayConfig({ ...undeclaredConfigs.get('myrix-llm-gateway') }, () => 'gateway-token-0123456789abcdef0123456789'),
+    /必须是 https/,
+  )
+
+  // (b) A declared list that does not match the actual origin (wrong port):
+  //     the plugin still denies, so a mismatched deployment fails closed.
+  const mismatchedHome = tempDir(t)
+  const mismatched = createCellProfile(composeCellOptions(mismatchedHome, {
+    internalHttpOrigins: ['http://bff:9999', 'http://gateway:8790'],
+  }))
+  const mismatchedConfigs = await evalProfileConfigs(mismatched.files.patch, cellEnv(mismatched))
+  assert.throws(
+    () => resolveLeaseConfig({
+      ...mismatchedConfigs.get('myrix-binding-lease'),
+      token: 'works-token-0123456789abcdef0123456789',
+    }),
+    /回环/,
+  )
+  // The gateway origin is in that list, so it ACTIVATES; the denial is per-origin,
+  // not "one bad entry disables everything" (the entry parser already rejected
+  // malformed entries before the factory ever sees them).
+  assert.doesNotThrow(() => resolveGatewayConfig(
+    { ...mismatchedConfigs.get('myrix-llm-gateway') },
+    () => 'gateway-token-0123456789abcdef0123456789',
+  ))
+
+  // (c) A malformed declaration the entry would have refused is refused again by
+  //     BOTH plugins, even though the row's own origin is approved.
+  const hostileHome = tempDir(t)
+  const hostile = createCellProfile(composeCellOptions(hostileHome, {
+    internalHttpOrigins: ['http://bff:8791', 'http://*:1'],
+  }))
+  const hostileConfigs = await evalProfileConfigs(hostile.files.patch, cellEnv(hostile))
+  assert.throws(
+    () => resolveLeaseConfig({ ...hostileConfigs.get('myrix-binding-lease'), token: 'works-token-0123456789abcdef0123456789' }),
+    /internalHttpOrigins/,
+  )
+  assert.throws(
+    () => resolveGatewayConfig({ ...hostileConfigs.get('myrix-llm-gateway') }, () => 'gateway-token-0123456789abcdef0123456789'),
+    /internalHttpOrigins/,
+  )
+})
+
+test('the factory refuses a non-array internalHttpOrigins instead of silently denying', (t) => {
+  const home = tempDir(t)
+  for (const bad of ['http://bff:8791', 7, [1], [null]]) {
+    assert.throws(
+      () => createCellProfile(composeCellOptions(join(home, `bad-${String(bad).replace(/\W/g, '')}`), { internalHttpOrigins: bad })),
+      /internalHttpOrigins/,
+      `rejected ${JSON.stringify(bad)}`,
+    )
+  }
 })

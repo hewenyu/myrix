@@ -45,7 +45,7 @@ import {
 } from './fake-gateway.ts'
 import { bootHarness, collect, fakeAgent, finishOf, principal, request, snapshot, userMessage } from './harness.ts'
 import { encodeRequest } from '../src/wire.ts'
-import { resolveConfig } from '../src/config.ts'
+import { resolveConfig, resolveInternalHttpOrigins } from '../src/config.ts'
 
 const TOKEN = 'cell-token-0123456789'
 const open: FakeGateway[] = []
@@ -842,6 +842,77 @@ describe('HTTP 错误与密钥不外泄', () => {
   it('baseURL 缺失或非法 → 启动即失败', async () => {
     expect(await rejectionOf(bootHarness({ baseURL: '' }))).toContain('baseURL')
     expect(await rejectionOf(bootHarness({ baseURL: 'not-a-url' }))).toContain('不是合法 URL')
+  })
+})
+
+describe('同机内部 HTTP 声明（ADR 0030）', () => {
+  it('默认空列表：非回环明文仍然拒绝，loopback 照常', async () => {
+    await expect(bootHarness({ baseURL: 'http://gateway:8790/v1' })).rejects.toThrow(/必须是 https/)
+    expect(resolveInternalHttpOrigins(undefined)).toEqual([])
+    // loopback 明文在没有声明时依旧可用（本地联调路径未被收紧）。
+    expect(() => resolveConfig({ baseURL: 'http://127.0.0.1:1/v1', models: ['m'], contextWindow: 1000 }, () => TOKEN))
+      .not.toThrow()
+  })
+
+  it('声明后只放行精确 origin；端口不匹配、公网域名、IP 全部仍拒绝', async () => {
+    const declared = ['http://gateway:8790']
+    const cfg = resolveConfig(
+      { baseURL: 'http://gateway:8790/v1', internalHttpOrigins: declared, models: ['m'], contextWindow: 1000 },
+      () => TOKEN,
+    )
+    expect(cfg.baseURL).toBe('http://gateway:8790/v1')
+    expect(cfg.endpoint).toBe('http://gateway:8790/v1/responses')
+    expect(cfg.internalHttpOrigins).toEqual(declared)
+    // 端点路径前缀不参与声明匹配，声明的是 origin。
+    expect(() => resolveConfig(
+      { baseURL: 'http://gateway:8791/v1', internalHttpOrigins: declared, models: ['m'], contextWindow: 1000 },
+      () => TOKEN,
+    )).toThrow(/必须是 https/)
+    await expect(bootHarness({ baseURL: 'http://evil.example:8790/v1', internalHttpOrigins: declared }))
+      .rejects.toThrow(/必须是 https/)
+  })
+
+  it('Responses-only 与重定向拒绝语义不变，声明只是放行传输', async () => {
+    // chat/completions 仍然被显式拒绝，即便声明了明文 origin。
+    expect(await rejectionOf(bootHarness({
+      baseURL: 'http://gateway:8790/v1/chat/completions',
+      internalHttpOrigins: ['http://gateway:8790'],
+    }))).toContain('chat/completions')
+    // 完整 /responses 端点仍被拒绝（由适配器追加）。
+    expect(await rejectionOf(bootHarness({
+      baseURL: 'http://gateway:8790/v1/responses',
+      internalHttpOrigins: ['http://gateway:8790'],
+    }))).toContain('网关 origin')
+  })
+
+  it('非法声明项（即使本次未用到）启动即失败，且不回显凭据', () => {
+    expect(() => resolveConfig(
+      {
+        baseURL: 'https://gw.example.com/v1',
+        internalHttpOrigins: ['http://bff:8791', 'http://*:1'],
+        models: ['m'],
+        contextWindow: 1000,
+      },
+      () => TOKEN,
+    )).toThrow(/internalHttpOrigins/)
+    expect(() => resolveConfig(
+      {
+        baseURL: 'https://gw.example.com/v1',
+        internalHttpOrigins: 'http://bff:8791' as never,
+        models: ['m'],
+        contextWindow: 1000,
+      },
+      () => TOKEN,
+    )).toThrow(/字符串数组/)
+    for (const bad of ['https://bff:8791', 'http://bff:8791/', 'http://bff:8791?x=1', 'http://bff.example:8791', 'http://8.8.8.8:8791']) {
+      expect(() => resolveInternalHttpOrigins([bad]), `rejected ${bad}`).toThrow(/internalHttpOrigins/)
+    }
+    try {
+      resolveInternalHttpOrigins(['http://user:secret@bff:8791'])
+      expect.unreachable('内嵌凭据必须被拒')
+    } catch (error) {
+      expect(String(error)).not.toContain('secret')
+    }
   })
 })
 

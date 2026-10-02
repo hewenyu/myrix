@@ -250,6 +250,43 @@ export function enqueueBodyOf(input: { op: string; sessionId: string; commandId:
   return head;
 }
 
+/**
+ * 哪些命令允许触发**会话恢复**（预检 + 反应式两条路径的唯一判据）。
+ *
+ * 只有承载类命令 `send` / `cancel`：它们的前提是"该会话**本该已经打开**"，
+ * driver 报 `session_not_open` / `identity_invalid` 才是与前提矛盾的、值得恢复的窗口。
+ *
+ * `create` / `resume` **自己就是"打开会话"的动作**，绝不参与恢复：
+ *   * 预检：它们不需要 `open-proof`，也不该因为 boot 不匹配而入队一条新的 resume；
+ *   * 反应式：driver 对它们的拒绝若被当成"没打开"，会让 `deliver` 把**这一条**
+ *     create/resume 反复让路重投（`deferForRecovery` 把 `attempts` 退回到 0）。
+ *
+ * 这里要说清**真实生产**里 create/resume 的失败形状，不能写成"命令无限增长"：
+ *   * 恢复请求本身要先读 binding，而 create 尚未完成时 binding 仍是 `creating`
+ *     （见 `createSession`），`requestResume` 以 `binding-not-active` 判 `denied`，
+ *     **不会**入队任何 resume；`denied` 只让**同一条** create 走 60s 长退避，
+ *     每轮退还一次认领预算 —— 命令数恒为 1，但 create 被**无限期延后**
+ *     （"production create forever creating"），且该退避不消耗 `attempts`。
+ *   * 对一条已经在投递中的 resume（binding 已 active）：driver 报可恢复码时，
+ *     `requestResume` 会先 `listResumes` 看到**它自己**仍处于 `queued|inflight`，
+ *     因而返回 `pending`，同样只让**同一条** resume 让路；这是同一条命令的自循环，
+ *     不是新命令的增长。
+ *
+ * 所以本判据消掉的是"用恢复去重试 create/resume 自己"这条**无限延后/预算退还**的
+ * 自我循环；它既不新增 resume，也不放宽任何身份/授权结论。禁止在这里或调用处
+ * 写"入队无界的新 resume"之类与生产不符的断言。
+ *
+ * create/resume 的 driver 拒绝必须走**有界失败分类**（`failureToOutcome`）：
+ * 可重试（5xx/429/网络）→ 退避且真实消耗 `attempts`，不可重试（4xx 明确拒绝）→
+ * `failed`，由 `attempts`/`max_attempts` 兜底。
+ *
+ * 这是**收窄**判定：`create`/`resume` 的任何身份/授权结论都不因此放宽，
+ * 只是不再把它们当成"可恢复的承载投递"。
+ */
+export function isRecoveryCarryingOp(op: string): boolean {
+  return op === "send" || op === "cancel";
+}
+
 export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRuntime {
   const store = deps.store;
   const logger = deps.logger ?? silentRuntimeLogger;
@@ -716,8 +753,8 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
     // `unknown`（没有成功回执）时不做任何推断，直接把命令交给 driver 权威判定，
     // 由反应式恢复兜底 —— 否则"没有回执"会被误当成"没打开"，把正常会话也拦下来。
     // `unavailable`（读取失败）必须 fail-closed：不投递、不生成 resume，释放重试。
-    // create/resume 自身绝不递归 preflight。
-    if (recoveryEnabled && command.op !== "create" && command.op !== "resume") {
+    // create/resume 自身绝不递归 preflight（见 `isRecoveryCarryingOp`）。
+    if (recoveryEnabled && isRecoveryCarryingOp(command.op)) {
       const proof = await recovery.openProof(command.tenantId, command.bindingId, ready.value.bootId);
       if (proof.state === "unavailable") {
         // 读取失败必须 fail-closed：不投递、不生成 resume。按"等待恢复"让路，
@@ -816,9 +853,17 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
     // （同一 boot 下 Agent 被释放、绑定在本进程创建前的事实被清空等），必须有有界恢复
     // 路径，否则消息会被永久 fail。
     //
+    // **只对承载类命令（send/cancel）生效**（`isRecoveryCarryingOp`）：create/resume
+    // 本身就是"打开会话"的动作，driver 对它们的拒绝是对**这一次打开**的结论。
+    // 若把它们当可恢复，`deliver` 会把**同一条**命令反复让路（`attempts` 退回 0）：
+    // 生产里 create 时 binding 仍是 creating，`requestResume` 判 `binding-not-active`
+    // 并返回 `denied`（零新 resume），于是同一条 create 被无限期 60s 长退避 ——
+    // 命令数恒为 1，但永远不结算。它们必须走下面的有界失败分类
+    // （可重试退避 / 明确拒绝 failed）。
+    //
     // 严格限定在这两个机器可读码：其余 403（not_owner / identity_mismatch / rev_stale /
     // session_revoked / grant/*）是身份或撤权结论，绝不当作可恢复。
-    if (isRecoverableDriverCode(posted.code)) {
+    if (isRecoveryCarryingOp(command.op) && isRecoverableDriverCode(posted.code)) {
       const requested = recoveryEnabled
         ? await requestRecovery({
             tenantId: command.tenantId,

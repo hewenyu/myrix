@@ -313,11 +313,16 @@ export function parseGrantJwks(raw) {
  *
  * Credentials, query strings and fragments are rejected so a token can never be
  * smuggled into a URL that ends up in a log. Plain HTTP requires loopback or
- * an exact, explicitly declared same-host Compose service origin (ADR 0029).
+ * an exact origin present in `internalHttpOrigins` (ADR 0029 / ADR 0030).
+ *
+ * The allowlist is an exact-match set of canonical origins: a declared
+ * `http://bff:8791` never admits `http://bff:8792`, a public host, an IP, or a
+ * wildcard. The same list is forwarded to the plugins, which repeat the check.
  *
  * @param {string} value - the configured URL.
  * @param {string} name - the variable name (for the message).
- * @returns {string} the normalized origin.
+ * @param {readonly string[]} internalHttpOrigins - already-validated declarations.
+ * @returns {string} the configured URL (callers pass an already-canonical value).
  */
 export function parseOrigin(value, name, internalHttpOrigins = []) {
   let url
@@ -339,7 +344,20 @@ export function parseOrigin(value, name, internalHttpOrigins = []) {
   return value
 }
 
-/** Exact same-host Docker DNS origins only; never a blanket insecure-HTTP flag. */
+/**
+ * Parse `MYRIX_CELL_INTERNAL_HTTP_ORIGINS`: exact same-host Docker DNS origins
+ * only; never a blanket insecure-HTTP flag.
+ *
+ * Validation mirrors `normalizeInternalHttpOrigin` in both plugins (ADR 0030):
+ * a JSON array of at most 16 canonical `http://<single-label-service>:<port>`
+ * origins. Credentials, paths (including a trailing `/`), query strings,
+ * fragments, wildcards, IPs, multi-label names and other protocols are all
+ * refused, and the raw value is never echoed in the error.
+ *
+ * @param {string | undefined} raw - the environment value.
+ * @returns {readonly string[]} the distinct declared origins.
+ * @throws {CellEntryError} when the value is not such an array.
+ */
 export function parseInternalHttpOrigins(raw) {
   if (raw === undefined) return []
   try {
@@ -460,6 +478,9 @@ export function resolveCellConfig(env) {
     appRoot,
     home,
     credentialsDir,
+    // The exact, entry-validated same-host declarations. They travel unchanged
+    // to the plugins, which validate them again (ADR 0030).
+    internalHttpOrigins,
     cellId: identifier(env, CELL_ENV.cellId),
     tenantId: identifier(env, CELL_ENV.tenantId),
     issuer: env[CELL_ENV.issuer] === undefined || env[CELL_ENV.issuer] === '' ? 'myrix-control-plane' : env[CELL_ENV.issuer],
@@ -565,6 +586,7 @@ export function buildCellOptions(config, allowedTools) {
     worksToken: config.secrets.worksToken,
     gatewayBaseURL: config.gatewayURL,
     gatewayToken: config.secrets.gatewayToken,
+    internalHttpOrigins: config.internalHttpOrigins,
     providers: config.providers,
     models: config.models,
     contextWindow: config.contextWindow,

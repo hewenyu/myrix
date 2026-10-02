@@ -69,10 +69,13 @@ export {
   MAX_REQUEST_TIMEOUT_MS,
   MAX_RESPONSE_BYTES_CAP,
   MAX_TTL_MS,
+  MAX_INTERNAL_HTTP_ORIGINS,
+  normalizeInternalHttpOrigin,
   normalizeOrigin,
   redact,
   renderPath,
   resolveConfig,
+  resolveInternalHttpOrigins,
 } from './config'
 export type { Config, ResolvedConfig } from './config'
 export { fetchSnapshot } from './fetch'
@@ -502,6 +505,8 @@ export function applyWithIo(ctx: Context, config: Config, io: LeaseIo): void {
     tenantId: cfg.tenantId,
     // 只报 origin：token 与完整 URL 都不进日志。
     origin: cfg.origin,
+    // 只报声明条数：声明内容本身是网络拓扑，不是必须外发的信息。
+    internalHttpOrigins: cfg.internalHttpOrigins.length,
     ttlMs: cfg.ttlMs,
     refreshMs: cfg.refreshMs,
     requestTimeoutMs: cfg.requestTimeoutMs,
