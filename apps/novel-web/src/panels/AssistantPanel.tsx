@@ -1,24 +1,21 @@
 import type { NovelPreset, NovelSession } from "@myrix/contracts";
-import { useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { Banner, EmptyHint, StatusPill } from "../components/common";
+import { Banner, StatusPill } from "../components/common";
+import { Icon } from "../components/Icon";
 import { visibleMessages } from "../state/chatReducer";
 import { describeRunState, describeSessionStatus, looksLikeHtml } from "../state/status";
 import type { SessionStreamState } from "../state/useSessionStream";
+import { formatTime } from "./format";
 
 export const PRESET_LABELS: Record<NovelPreset, { title: string; hint: string }> = {
-  "novel-outline": { title: "大纲助手", hint: "整理故事线、结构与节奏" },
-  "novel-chapter": { title: "章节写作", hint: "起草与修改章节正文" },
-  "novel-bible": { title: "设定管理", hint: "维护人物、设定与时间线" },
+  "novel-assistant": { title: "创作 Agent", hint: "一起构思、写作和打磨故事" },
+  "novel-outline": { title: "历史大纲对话", hint: "此历史对话仅有大纲工具权限" },
+  "novel-chapter": { title: "历史章节对话", hint: "此历史对话仅有章节工具权限" },
+  "novel-bible": { title: "历史设定对话", hint: "此历史对话仅有设定工具权限" },
 };
-
-export const PRESET_KEYS = ["novel-outline", "novel-chapter", "novel-bible"] as const satisfies readonly NovelPreset[];
-
-/** preset 展示信息；服务端若下发未知 preset，原样回显而不是假装是已知助手。 */
-export function presetLabel(preset: string): { title: string; hint: string } {
-  const known = PRESET_LABELS[preset as NovelPreset] as { title: string; hint: string } | undefined;
-  return known ?? { title: preset, hint: "未知助手类型" };
-}
+export const PRESET_KEYS = ["novel-assistant"] as const;
+export function presetLabel(preset: string) { return PRESET_LABELS[preset as NovelPreset] ?? { title: preset, hint: "未知助手类型" }; }
 
 export interface AssistantPanelProps {
   workId: string | null;
@@ -27,260 +24,116 @@ export interface AssistantPanelProps {
   sessionsError: string | null;
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
-  onCreateSession: (preset: NovelPreset) => void;
+  onCreateSession: (preset: NovelPreset) => void | Promise<string | null>;
+  onNewConversation?: () => void;
   createPending: boolean;
   createError: string | null;
   onDeleteSession: (sessionId: string) => void;
   deletePending: boolean;
+  deleteError?: string | null;
+  onArchiveSession?: (sessionId: string, archived: boolean) => void;
+  archivePending?: boolean;
+  archiveError?: string | null;
   onReloadSessions: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
   stream: SessionStreamState;
-  /** 运行单元是否可用（用于“唤醒中/未配置模型”等提示的上下文）。 */
   runtimeHint: string | null;
 }
 
-/**
- * 右栏助手：preset 选择、会话列表、消息流与取消。
- *
- * 关键约束：
- * - 消息全部来自真实 SSE 事件或本机已确认入队的命令，绝不生成占位正文；
- * - 模型文本一律按纯文本渲染，不使用 dangerouslySetInnerHTML；
- * - “已入队”与“已完成”在 UI 上是两种状态。
- */
-export function AssistantPanel({
-  workId,
-  sessions,
-  sessionsLoading,
-  sessionsError,
-  selectedSessionId,
-  onSelectSession,
-  onCreateSession,
-  createPending,
-  createError,
-  onDeleteSession,
-  deletePending,
-  onReloadSessions,
-  stream,
-  runtimeHint,
-}: AssistantPanelProps) {
-  const [preset, setPreset] = useState<NovelPreset>("novel-chapter");
+export function AssistantPanel({ workId, sessions, sessionsLoading, sessionsError, selectedSessionId, onSelectSession, onCreateSession, onNewConversation, createPending, createError, onDeleteSession, deletePending, deleteError, onArchiveSession, archivePending, archiveError, onReloadSessions, onDirtyChange, stream, runtimeHint }: AssistantPanelProps) {
   const [draft, setDraft] = useState("");
-
-  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
-  // 运行标签由持久事实推导：终态 / 进行中 / 连接生命周期，绝不停在瞬态 stream-start。
-  const statusLabel = describeRunState({
-    hasSession: Boolean(selectedSessionId),
-    connected: stream.connected,
-    turnActive: stream.turnActive,
-    turnOutcome: stream.turnOutcome,
-    settledSeq: stream.settledSeq,
-    serverStatus: stream.serverStatus,
-    serverStatusSeq: stream.serverStatusSeq,
-  });
-  // 渲染层只显示有公开内容的消息：空助手泡/空工具泡一律不出现。
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [firstMessage, setFirstMessage] = useState<{ sessionId: string; text: string } | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const lock = useRef(false);
+  const generation = useRef(0);
+  const mounted = useRef(true);
+  const log = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { onDirtyChange?.(draft.trim().length > 0); }, [draft, onDirtyChange]);
+  useEffect(() => {
+    if (textarea.current) { textarea.current.style.height = "auto"; textarea.current.style.height = `${Math.min(180, Math.max(72, textarea.current.scrollHeight))}px`; }
+  }, [draft]);
+  const selectedSession = sessions.find((item) => item.id === selectedSessionId);
+  const archived = Boolean(selectedSession?.archivedAt);
   const messages = visibleMessages(stream.messages);
+  const statusLabel = describeRunState({ hasSession: Boolean(selectedSessionId), connected: stream.connected, turnActive: stream.turnActive, turnOutcome: stream.turnOutcome, settledSeq: stream.settledSeq, serverStatus: stream.serverStatus, serverStatusSeq: stream.serverStatusSeq });
+  const waiting = stream.turnActive || stream.sending || stream.messages.some((message) => message.pending);
+  const terminal = selectedSession?.status === "revoked" || stream.serverStatus === "revoked" || stream.turnOutcome === "session-ended";
+  useEffect(() => { if (follow.current && log.current) log.current.scrollTop = log.current.scrollHeight; }, [stream.messages, selectedSessionId]);
 
-  return (
-    <section className="pane assistant" aria-label="创作助手">
-      <header className="pane-header">
-        <span>创作助手</span>
-        <span className="spacer" />
-        <button type="button" onClick={onReloadSessions} disabled={sessionsLoading || !workId}>
-          {sessionsLoading ? "读取中…" : "刷新会话"}
-        </button>
-      </header>
+  const sendText = useCallback(async (text: string) => {
+    const start = generation.current;
+    lock.current = true; setSubmitting(true);
+    try {
+      const result = await stream.send(text);
+      if (mounted.current && start === generation.current && result !== false) setDraft((value) => value.trim() === text ? "" : value);
+    } catch { if (mounted.current && start === generation.current) setLocalError("消息未发送成功，输入已保留，请重试。"); }
+    finally { if (mounted.current && start === generation.current) { lock.current = false; setSubmitting(false); } }
+  }, [stream]);
+  // 创建是异步激活的：只有该会话流真正连通后才发送首条消息，绝不误发到另一个会话。
+  useEffect(() => {
+    if (!firstMessage || firstMessage.sessionId !== selectedSessionId || stream.sessionId !== selectedSessionId || !stream.connected || lock.current) return;
+    setFirstMessage(null);
+    void sendText(firstMessage.text);
+  }, [firstMessage, selectedSessionId, stream.sessionId, stream.connected, sendText]);
+  useEffect(() => {
+    if (!firstMessage) return;
+    const timeout = window.setTimeout(() => { setFirstMessage(null); setLocalError("对话连接尚未就绪，消息仍保留在输入框。连接恢复后请再次发送。"); }, 30_000);
+    return () => window.clearTimeout(timeout);
+  }, [firstMessage]);
 
-      <div className="pane-body stack" style={{ flex: "0 0 auto", maxHeight: "42vh" }}>
-        {runtimeHint ? <Banner level="warn">{runtimeHint}</Banner> : null}
-        {sessionsError ? (
-          <Banner level="error" actions={<button type="button" onClick={onReloadSessions}>重试</button>}>
-            {sessionsError}
-          </Banner>
-        ) : null}
+  const navigate = (action: () => void) => {
+    if ((draft.trim() || firstMessage || submitting) && !window.confirm("当前消息尚未发送完成。切换对话将放弃输入内容，是否继续？")) return;
+    generation.current++; lock.current = false; setSubmitting(false); setFirstMessage(null); setDraft(""); setLocalError(null); setHistoryOpen(false); follow.current = true; action();
+  };
+  const submit = async () => {
+    const text = draft.trim();
+    if (!workId || !text || lock.current || createPending || firstMessage || waiting || archived || terminal || (selectedSessionId && (!stream.connected || stream.sessionId !== selectedSessionId))) return;
+    setLocalError(null);
+    if (selectedSessionId) { await sendText(text); return; }
+    const start = generation.current;
+    lock.current = true; setSubmitting(true);
+    try {
+      const id = await onCreateSession("novel-assistant");
+      if (mounted.current && start === generation.current && id) setFirstMessage({ sessionId: id, text });
+    } catch { if (mounted.current && start === generation.current) setLocalError("未能开启对话，请重试。消息已保留。"); }
+    finally { if (mounted.current && start === generation.current) { lock.current = false; setSubmitting(false); } }
+  };
 
-        <div className="preset-grid">
-          {PRESET_KEYS.map((key) => {
-            const info = presetLabel(key);
-            return (
-              <button
-                key={key}
-                type="button"
-                data-testid="preset-option"
-                aria-pressed={preset === key}
-                onClick={() => setPreset(key)}
-                title={info.hint}
-              >
-                {preset === key ? "● " : "○ "}
-                {info.title}
-                <span className="item-sub">{info.hint}</span>
-              </button>
-            );
-          })}
-        </div>
-        <button
-          type="button"
-          className="primary"
-          disabled={!workId || createPending}
-          onClick={() => onCreateSession(preset)}
-        >
-          {createPending ? "创建中…" : `新建会话（${presetLabel(preset).title}）`}
-        </button>
-        {createError ? <Banner level="error">{createError}</Banner> : null}
-
-        <ul className="list">
-          {sessions.map((session) => {
-            const label = describeSessionStatus(session.status);
-            return (
-              <li key={session.id}>
-                <button
-                  type="button"
-                  className="item"
-                  aria-current={session.id === selectedSessionId}
-                  onClick={() => onSelectSession(session.id)}
-                >
-                  {presetLabel(session.preset).title}
-                  <span className="item-sub">
-                    {label.text} · {new Date(session.createdAt).toLocaleString("zh-CN", { hour12: false })}
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-        {!sessionsLoading && workId && sessions.length === 0 ? (
-          <EmptyHint>该作品还没有助手会话，选择 preset 后新建。</EmptyHint>
-        ) : null}
-        {!workId ? <EmptyHint>请先在左侧选择或创建作品。</EmptyHint> : null}
+  return <section className="pane assistant" aria-label="创作助手">
+    <header className="pane-header assistant-header"><span className="agent-mark"><Icon name="spark" size={18} /></span><div><strong>创作 Agent</strong><span className="agent-subtitle">陪你把故事写下去</span></div><span className="spacer" /><button type="button" className="icon-button" aria-label="历史对话" title="历史对话" aria-expanded={historyOpen} onClick={() => setHistoryOpen(!historyOpen)}><Icon name="history" /></button><button type="button" className="icon-button" aria-label="新对话" title="新对话" onClick={() => navigate(() => onNewConversation?.())}><Icon name="plus" /></button></header>
+    {historyOpen ? <div className="conversation-history"><div className="row"><strong>对话记录</strong><span className="spacer" /><button className="text-button" type="button" onClick={onReloadSessions} disabled={sessionsLoading}>刷新</button></div><div className="history-tabs"><button type="button" aria-pressed={!showArchived} onClick={() => setShowArchived(false)}>最近</button><button type="button" aria-pressed={showArchived} onClick={() => setShowArchived(true)}>已归档</button></div>
+      {sessionsLoading ? <p className="small muted">正在读取…</p> : null}
+      {sessionsError ? <Banner level="error">{sessionsError}</Banner> : null}
+      {!sessionsLoading && !sessions.some((item) => Boolean(item.archivedAt) === showArchived) ? <p className="small muted">{showArchived ? "没有已归档对话。" : "还没有对话，从下面的一句话开始。"}</p> : null}
+      <ul className="list">{sessions.filter((item) => Boolean(item.archivedAt) === showArchived).map((item, index) => <li className="history-item" key={item.id} data-session-id={item.id}><button className="item" type="button" aria-current={item.id === selectedSessionId} onClick={() => navigate(() => onSelectSession(item.id))}><span>{presetLabel(item.preset).title} · {index + 1}</span><span className="item-sub">{formatTime(item.createdAt)} · {describeSessionStatus(item.status).text}</span></button>{onArchiveSession ? <button type="button" className="icon-button" disabled={archivePending} aria-label={item.archivedAt ? "恢复对话" : "归档对话"} title={item.archivedAt ? "恢复对话" : "归档对话（不停止正在执行的任务）"} onClick={() => { if (item.id === selectedSessionId && !item.archivedAt) navigate(() => onArchiveSession(item.id, true)); else onArchiveSession(item.id, !item.archivedAt); }}>{item.archivedAt ? "恢复" : <Icon name="archive" size={17} />}</button> : null}</li>)}</ul>
+      <p className="small muted">归档只整理记录，不会删除内容或停止任务。</p>
+    </div> : null}
+    <div className="chat">
+      {selectedSessionId ? <div className="toolbar chat-status small"><span className={`connection-dot ${stream.connected ? "connected" : ""}`} />{statusLabel ? <StatusPill label="运行" value={statusLabel.text} level={statusLabel.level} /> : null}<span className="spacer" /><details className="session-options"><summary aria-label="当前对话操作"><Icon name="more" size={18} /></summary><div>{onArchiveSession ? <button type="button" disabled={archivePending} onClick={() => navigate(() => onArchiveSession(selectedSessionId, !archived))}>{archived ? "恢复对话" : "归档对话"}</button> : null}<button type="button" className="danger" disabled={deletePending || terminal} onClick={() => { if (window.confirm("永久结束这段对话？这会撤销权限，无法继续对话。整理记录请使用归档。")) navigate(() => onDeleteSession(selectedSessionId)); }}>永久结束对话</button></div></details></div> : null}
+      {selectedSession && selectedSession.preset !== "novel-assistant" ? <Banner level="warn">{presetLabel(selectedSession.preset).hint}。开始新对话可使用统一创作 Agent。</Banner> : null}
+      {archived ? <Banner level="warn">这段对话已归档，可查看历史。恢复后可以继续发送消息。</Banner> : null}
+      {[createError, archiveError, deleteError, localError, runtimeHint].filter(Boolean).map((error, index) => <Banner key={index} level="error">{error}</Banner>)}
+      {stream.notice ? <Banner level={stream.notice.level === "warn" ? "warn" : "error"}>{stream.notice.text}</Banner> : null}
+      {stream.turnOutcome === "failed" || stream.turnOutcome === "interrupted" || stream.turnOutcome === "session-ended" ? <Banner level={stream.turnOutcome === "failed" ? "error" : "warn"}>{stream.turnOutcome === "failed" ? `本回合执行失败：${stream.turnOutcomeReason ?? "服务端未给出原因"}` : stream.turnOutcome === "interrupted" ? "本回合被中断；未持久确认的流式内容已移除，已保存的回复保留。" : `会话已结束${stream.turnOutcomeReason ? `：${stream.turnOutcomeReason}` : ""}，请开始新对话。`}</Banner> : null}
+      {stream.needsReplay ? <Banner level="warn" actions={<button type="button" onClick={stream.reconnect}>重新连接并补齐</button>}>对话记录可能有缺失，可重新连接补齐，已收到的内容不会被改动。</Banner> : null}
+      {selectedSessionId && !stream.connected && !stream.notice ? <Banner level="warn">{firstMessage ? "正在开启对话，连接就绪后会自动发送。" : "事件流已断开，正在自动重连；已保存的回复不会丢失。"}</Banner> : null}
+      {stream.error ? <Banner level="error" actions={<button type="button" onClick={stream.clearError}>关闭</button>}>{stream.error}</Banner> : null}
+      <div ref={log} className="chat-log" role="log" aria-label="对话内容" aria-live="polite" onScroll={() => { if (log.current) follow.current = log.current.scrollHeight - log.current.scrollTop - log.current.clientHeight < 70; }} data-testid="chat-log" data-turn-active={stream.turnActive ? "true" : "false"} data-turn-outcome={stream.turnOutcome ?? "none"} data-turn-public-text={stream.turnPublicText ? "true" : "false"}>
+        {messages.length === 0 ? <div className="chat-welcome"><span className="welcome-mark"><Icon name="spark" size={30} /></span><h2>今天，故事走向哪里？</h2><p>聊聊你的想法，或一起打磨下一页。<br />构思情节、描写人物、修改正文，都可以直接说。</p><div className="prompt-suggestions">{["陪我梳理一下这个故事的主线", "一起设计一个令人难忘的主角", "我有一段文字，想请你帮我润色"].map((text) => <button type="button" key={text} onClick={() => { setDraft(text); textarea.current?.focus(); }}>{text}<span aria-hidden="true">↗</span></button>)}</div></div> : null}
+        {messages.map((message) => <article key={message.key} className={`msg ${message.role}${message.streaming ? " streaming" : ""}`} data-role={message.role} data-seq={typeof message.seq === "number" ? String(message.seq) : undefined} data-streaming={message.streaming ? "true" : "false"}>
+          <div className="msg-meta"><span>{message.role === "user" ? "你" : message.role === "assistant" ? "Myrix" : message.role === "tool" ? "创作操作" : "系统"}</span>{message.pending ? <span>已入队，等待服务端确认</span> : null}{message.streaming ? <span>流式输出中（未落定）</span> : null}{message.toolName ? <span>{message.toolName}</span> : null}{looksLikeHtml(message.text) ? <span>按纯文本显示（未解析 HTML）</span> : null}</div><div className="msg-text">{message.text}</div>
+        </article>)}
       </div>
-
-      <div className="chat">
-        {selectedSession ? (
-          <div className="toolbar small">
-            <span className="muted">{presetLabel(selectedSession.preset).title}</span>
-            <StatusPill
-              label="连接"
-              value={stream.connected ? "已连接" : "已断开"}
-              level={stream.connected ? "ok" : "warn"}
-            />
-            {statusLabel ? <StatusPill label="运行" value={statusLabel.text} level={statusLabel.level} /> : null}
-            <span className="spacer" />
-            <button
-              type="button"
-              className="danger"
-              disabled={deletePending}
-              onClick={() => onDeleteSession(selectedSession.id)}
-              title="撤销该会话并销毁运行时 Agent"
-            >
-              {deletePending ? "撤销中…" : "撤销会话"}
-            </button>
-          </div>
-        ) : null}
-
-        {stream.notice ? <Banner level={stream.notice.level === "warn" ? "warn" : "error"}>{stream.notice.text}</Banner> : null}
-        {stream.turnOutcome === "failed" || stream.turnOutcome === "interrupted" || stream.turnOutcome === "session-ended" ? (
-          <Banner level={stream.turnOutcome === "failed" ? "error" : "warn"}>
-            {stream.turnOutcome === "failed"
-              ? `本回合执行失败：${stream.turnOutcomeReason ?? "服务端未给出原因"}`
-              : stream.turnOutcome === "interrupted"
-                ? "本回合被中断；未持久确认的流式内容已移除，已保存的回复保留。"
-                : `会话已结束${stream.turnOutcomeReason ? `：${stream.turnOutcomeReason}` : ""}，请新建或重新选择会话。`}
-          </Banner>
-        ) : null}
-        {stream.needsReplay ? (
-          <Banner
-            level="warn"
-            actions={
-              <button type="button" onClick={stream.reconnect}>
-                重新连接并补齐
-              </button>
-            }
-          >
-            持久事件出现序号缺口，可能有内容缺失。已收到的内容保持不变，可重新连接让服务端按
-            Last-Event-ID 补发。
-          </Banner>
-        ) : null}
-        {selectedSessionId && !stream.connected && !stream.notice ? (
-          <Banner level="warn">
-            事件流已断开，正在自动重连；重连后以持久事件（seq）为准，期间不展示任何未确认内容。
-          </Banner>
-        ) : null}
-        {stream.error ? (
-          <Banner level="error" actions={<button type="button" onClick={stream.clearError}>关闭</button>}>
-            {stream.error}
-          </Banner>
-        ) : null}
-
-        <div className="chat-log" data-testid="chat-log" data-turn-active={stream.turnActive ? "true" : "false"} data-turn-outcome={stream.turnOutcome ?? "none"} data-turn-public-text={stream.turnPublicText ? "true" : "false"}>
-          {!selectedSessionId ? <EmptyHint>选择或新建一个会话后开始对话。</EmptyHint> : null}
-          {selectedSessionId && messages.length === 0 ? (
-            <EmptyHint>还没有消息。提交后先在平台入队，模型回复通过事件流到达。</EmptyHint>
-          ) : null}
-          {messages.map((message) => (
-            <article
-              key={message.key}
-              className={`msg ${message.role}${message.streaming ? " streaming" : ""}`}
-              data-role={message.role}
-              data-seq={typeof message.seq === "number" ? String(message.seq) : undefined}
-              data-streaming={message.streaming ? "true" : "false"}
-            >
-              <div className="msg-meta">
-                <span>
-                  {message.role === "user"
-                    ? "用户"
-                    : message.role === "assistant"
-                      ? "助手"
-                      : message.role === "tool"
-                        ? "工具"
-                        : "系统"}
-                </span>
-                {message.pending ? <span>已入队，等待服务端确认</span> : null}
-                {message.streaming ? <span>流式输出中（未落定）</span> : null}
-                {typeof message.seq === "number" ? <span>seq {message.seq}</span> : null}
-                {message.toolName ? <span>{message.toolName}</span> : null}
-                {looksLikeHtml(message.text) ? <span>按纯文本显示（未解析 HTML）</span> : null}
-              </div>
-              <div className="msg-text">{message.text}</div>
-            </article>
-          ))}
-        </div>
-
-        <form
-          className="chat-compose"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const text = draft.trim();
-            if (text.length === 0 || !selectedSessionId) return;
-            void stream.send(text);
-            setDraft("");
-          }}
-        >
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={selectedSessionId ? "描述你的需求，提交后由助手处理" : "先选择或新建会话"}
-            disabled={!selectedSessionId}
-            aria-label="消息输入"
-          />
-          <div className="row">
-            <button type="submit" className="primary" disabled={!selectedSessionId || stream.sending || draft.trim().length === 0}>
-              {stream.sending ? "提交中…" : "提交"}
-            </button>
-            <button
-              type="button"
-              className="danger"
-              disabled={!selectedSessionId}
-              onClick={() => void stream.cancel()}
-              title={
-                stream.lastCommandId
-                  ? "请求取消最近一次提交的命令"
-                  : "本页没有记录到命令；刷新页面后需重新提交或改用撤销会话"
-              }
-            >
-              取消
-            </button>
-            {stream.turnActive ? <span className="small muted">模型正在生成…</span> : null}
-          </div>
-        </form>
-      </div>
-    </section>
-  );
+      <form className="chat-compose" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+        <textarea ref={textarea} value={draft} onChange={(event) => setDraft(event.target.value)} aria-label="消息输入" placeholder={archived ? "恢复对话后继续聊" : "说说你的想法，或想修改的地方…"} disabled={!workId || archived || terminal || Boolean(firstMessage)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void submit(); } }} />
+        <div className="compose-actions"><span className="small muted">{firstMessage || submitting ? "正在准备发送…" : "Enter 发送 · Shift + Enter 换行"}</span><span className="spacer" />{waiting ? <button type="button" className="send-button stop-button" aria-label="停止生成" title={stream.lastCommandId ? "停止生成（已保存内容会保留）" : "此任务不是从本页发出，无法获取停止目标"} disabled={!stream.lastCommandId} onClick={() => void stream.cancel()}><Icon name="stop" size={19} /></button> : <button type="submit" className="send-button" aria-label="发送消息" title="发送消息" disabled={!workId || !draft.trim() || submitting || createPending || Boolean(firstMessage) || archived || terminal || Boolean(selectedSessionId && (!stream.connected || stream.sessionId !== selectedSessionId))}><Icon name="arrow" size={20} /></button>}</div>
+      </form><p className="compose-footnote">AI 建议供参考 · 未保存正文不会自动发送</p>
+    </div>
+  </section>;
 }

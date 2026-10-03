@@ -247,6 +247,15 @@ export function useSessions(workId: string | null) {
       queryClient.invalidateQueries({ queryKey: workKeys.sessions(variables.workId) }),
   });
 
+  const archiveMutation = useMutation({
+    mutationFn: (variables: SessionRemoveVars & { archived: boolean }) => sessions.archive(variables.sessionId, variables.archived),
+    onSuccess: (session, variables) => {
+      queryClient.setQueryData<{ items: NovelSession[] }>(workKeys.sessions(variables.workId), (previous) =>
+        previous ? { items: previous.items.map((item) => item.id === session.id ? session : item) } : previous);
+      queryClient.invalidateQueries({ queryKey: workKeys.sessions(variables.workId) });
+    },
+  });
+
   const removeMutation = useMutation({
     mutationFn: (variables: SessionRemoveVars) => sessions.remove(variables.sessionId),
     onSuccess: (_result, variables) =>
@@ -261,6 +270,9 @@ export function useSessions(workId: string | null) {
     create: (preset: NovelPreset) => createMutation.mutateAsync({ workId: requireTarget(workId), preset }),
     createPending: createMutation.isPending,
     createError: createMutation.error ? describeError(createMutation.error).message : null,
+    archive: (sessionId: string, archived: boolean) => archiveMutation.mutateAsync({ workId: requireTarget(workId), sessionId, archived }),
+    archivePending: archiveMutation.isPending,
+    archiveError: archiveMutation.error ? describeError(archiveMutation.error).message : null,
     remove: (sessionId: string) => removeMutation.mutateAsync({ workId: requireTarget(workId), sessionId }),
     removePending: removeMutation.isPending,
     removeError: removeMutation.error ? describeError(removeMutation.error).message : null,

@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { BiblePanel } from "../src/panels/BiblePanel";
+import { BibleEditor, BibleNav } from "../src/panels/BiblePanel";
 import type { DraftState } from "../src/state/draft";
 import type { DraftEditor } from "../src/state/useDraft";
 
@@ -54,32 +54,18 @@ function stateWithServerSnapshot(serverVersion: number | null, conflictServerVer
   };
 }
 
-function renderPanel(editor: DraftEditor<BibleEntry>, selectedEntry: BibleEntry | null = entry) {
+function renderEditor(editor: DraftEditor<BibleEntry>, selectedEntry: BibleEntry | null = entry) {
   return render(
-    <BiblePanel
-      query=""
-      onQueryChange={vi.fn()}
-      items={[entry]}
-      isLoading={false}
-      error={null}
-      selectedEntryId={entry.id}
-      onSelect={vi.fn()}
-      onCreate={vi.fn()}
-      createPending={false}
-      createError={null}
-      onReload={vi.fn()}
-      editor={editor}
-      selectedEntry={selectedEntry}
-    />,
+    <BibleEditor editor={editor} selectedEntry={selectedEntry} isLoading={false} error={null} onReload={vi.fn()} />,
   );
 }
 
-describe("BiblePanel 冲突处理", () => {
+describe("BibleEditor 冲突处理", () => {
   it("只有旧快照时禁用采用/重试，提示重新读取并保留本地草稿", async () => {
     const editor = makeEditor(stateWithServerSnapshot(1));
     const user = userEvent.setup();
 
-    renderPanel(editor);
+    renderEditor(editor);
 
     const takeServer = screen.getByRole("button", { name: "采用服务端内容" });
     const saveOverwrite = screen.getByRole("button", { name: "以最新版本提交本地草稿" });
@@ -101,7 +87,7 @@ describe("BiblePanel 冲突处理", () => {
   });
 
   it("完全无服务端快照时禁用采用/重试并提示重新读取", () => {
-    renderPanel(makeEditor(stateWithServerSnapshot(null)));
+    renderEditor(makeEditor(stateWithServerSnapshot(null)));
 
     expect(screen.getByRole("button", { name: "采用服务端内容" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "以最新版本提交本地草稿" })).toBeDisabled();
@@ -112,7 +98,7 @@ describe("BiblePanel 冲突处理", () => {
     const editor = makeEditor(stateWithServerSnapshot(3));
     const user = userEvent.setup();
 
-    renderPanel(editor);
+    renderEditor(editor);
 
     const takeServer = screen.getByRole("button", { name: "采用服务端内容" });
     expect(takeServer).toBeEnabled();
@@ -129,10 +115,88 @@ describe("BiblePanel 冲突处理", () => {
     const editor = makeEditor(stateWithServerSnapshot(4));
     const user = userEvent.setup();
 
-    renderPanel(editor);
+    renderEditor(editor);
 
     expect(screen.getByRole("button", { name: "采用服务端内容" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "以最新版本提交本地草稿" }));
     expect(editor.save).toHaveBeenCalledWith(4);
+  });
+
+  it("检索结果不再包含该条目时仍保留编辑器与本地草稿", () => {
+    const editor = makeEditor(stateWithServerSnapshot(null), { conflict: null });
+
+    renderEditor(editor, null);
+
+    expect(screen.getByText(/当前检索结果不再包含该条目/)).toBeDefined();
+    expect((screen.getByLabelText("条目内容（纯文本）") as HTMLTextAreaElement).value).toBe("我的本地草稿");
+  });
+
+  it("无选中条目且无草稿时给出可选择提示", () => {
+    renderEditor(makeEditor({ base: null, server: null, text: "", conflict: null, notice: null }), null);
+    expect(screen.getByText("选择一个条目进行编辑。")).toBeDefined();
+  });
+});
+
+describe("BibleNav 目录（分类列表 + 收起的新增）", () => {
+  function renderNav(overrides: Partial<Parameters<typeof BibleNav>[0]> = {}) {
+    const props = {
+      query: "",
+      onQueryChange: vi.fn(),
+      items: [] as BibleEntry[],
+      isLoading: false,
+      error: null,
+      selectedEntryId: null,
+      dirtyEntryId: null,
+      savingEntryId: null,
+      onSelect: vi.fn(),
+      onCreate: vi.fn(),
+      createPending: false,
+      createError: null,
+      onReload: vi.fn(),
+      ...overrides,
+    };
+    return { props, ...render(<BibleNav {...props} />) };
+  }
+
+  it("默认收起新增表单，点“新增条目”后展开并提交", async () => {
+    const user = userEvent.setup();
+    const { props } = renderNav();
+
+    // 收起状态：同名按钮是展开开关，表单字段不在文档里。
+    expect(screen.queryByLabelText("条目类型")).toBeNull();
+    expect(screen.queryByLabelText("条目名称")).toBeNull();
+    expect(screen.queryByLabelText("新条目内容")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "新增条目" }));
+    await user.selectOptions(screen.getByLabelText("条目类型"), "timeline");
+    await user.type(screen.getByLabelText("条目名称"), "第三章时间线");
+    await user.type(screen.getByLabelText("新条目内容"), "正文");
+    await user.click(screen.getByRole("button", { name: "新增条目" }));
+
+    expect(props.onCreate).toHaveBeenCalledWith({ kind: "timeline", title: "第三章时间线", text: "正文" });
+  });
+
+  it("按人物/设定/时间线分类列出，并标注未保存草稿", () => {
+    const items: BibleEntry[] = [
+      entry,
+      { ...entry, id: "b2", kind: "setting", title: "世界观" },
+      { ...entry, id: "b3", kind: "timeline", title: "年表" },
+    ];
+    renderNav({ items, selectedEntryId: "b2", dirtyEntryId: "b2" });
+
+    expect(screen.getByText("人物（1）")).toBeDefined();
+    expect(screen.getByText("设定（1）")).toBeDefined();
+    expect(screen.getByText("时间线（1）")).toBeDefined();
+    expect(screen.getByRole("button", { name: /世界观[\s\S]*有未保存修改/ })).toBeDefined();
+  });
+
+  it("加载失败与空结果给出可重试的错误态与空态", async () => {
+    const user = userEvent.setup();
+    const { props } = renderNav({ error: "读取失败" });
+
+    expect(screen.getByRole("alert").textContent).toContain("读取失败");
+    expect(screen.getByText("没有匹配的设定条目。")).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    expect(props.onReload).toHaveBeenCalledTimes(1);
   });
 });

@@ -147,7 +147,7 @@ function ConcurrentHarness({ initialSession }: { initialSession: string | null }
   (globalThis as { __myrixStartTransition?: (callback: () => void) => void }).__myrixStartTransition =
     startTransition;
   const stream = useSessionStream(sessionId);
-  (globalThis as { __myrixSend?: (text: string) => Promise<void> }).__myrixSend = stream.send;
+  (globalThis as { __myrixSend?: (text: string) => Promise<boolean | void> }).__myrixSend = stream.send;
   return (
     <div>
       <span data-testid="pending">{isPending ? "pending" : "idle"}</span>
@@ -173,8 +173,8 @@ function setHarnessSession(next: string | null, transition: boolean): void {
   else setter(next);
 }
 
-function harnessSend(text: string): Promise<void> {
-  const send = (globalThis as { __myrixSend?: (text: string) => Promise<void> }).__myrixSend;
+function harnessSend(text: string): Promise<boolean | void> {
+  const send = (globalThis as { __myrixSend?: (text: string) => Promise<boolean | void> }).__myrixSend;
   if (!send) throw new Error("并发测试宿主尚未挂载");
   return send(text);
 }
@@ -260,7 +260,7 @@ describe("useSessionStream", () => {
     const pending = deferred<QueuedCommand>();
     mocks.send.mockReturnValue(pending.promise);
 
-    let sending!: Promise<void>;
+    let sending!: Promise<boolean | void>;
     act(() => {
       sending = result.current.send("准备提交给 A");
     });
@@ -289,7 +289,7 @@ describe("useSessionStream", () => {
     const pending = deferred<QueuedCommand>();
     mocks.send.mockReturnValue(pending.promise);
 
-    let sending!: Promise<void>;
+    let sending!: Promise<boolean | void>;
     act(() => {
       sending = result.current.send("会失败的提交");
     });
@@ -311,7 +311,7 @@ describe("useSessionStream", () => {
     const pending = deferred<QueuedCommand>();
     mocks.send.mockReturnValue(pending.promise);
 
-    let sending!: Promise<void>;
+    let sending!: Promise<boolean | void>;
     act(() => {
       sending = result.current.send("第一次选择 A 时提交");
     });
@@ -376,7 +376,7 @@ describe("useSessionStream", () => {
     const pending = deferred<QueuedCommand>();
     mocks.send.mockReturnValue(pending.promise);
 
-    let sending!: Promise<void>;
+    let sending!: Promise<boolean | void>;
     act(() => {
       sending = result.current.send("卸载前提交");
     });
@@ -414,7 +414,7 @@ describe("useSessionStream", () => {
     const pending = deferred<QueuedCommand>();
     mocks.send.mockReturnValue(pending.promise);
 
-    let sending!: Promise<void>;
+    let sending!: Promise<boolean | void>;
     act(() => {
       sending = result.current.send("极快回复");
     });
@@ -483,7 +483,7 @@ describe("useSessionStream", () => {
     expect(aSource.url).toContain("s-A");
 
     // A 上的 send 正在等待 202。
-    let sending!: Promise<void>;
+    let sending!: Promise<boolean | void>;
     act(() => {
       sending = harnessSend("提交给 A");
     });
@@ -588,5 +588,92 @@ describe("useSessionStream", () => {
     expect(result.current.lastCommandId).toBe("c-late");
     expect(result.current.messages).toHaveLength(1);
     expect(result.current.sending).toBe(false);
+  });
+});
+
+/**
+ * `send` 现在返回 `Promise<boolean | void>`：**true = 本机已确认入队**，
+ * false/void = 这次没有落到当前会话（无会话、空文本、迟到代际、失败）。
+ * 面板据此决定是否清空草稿，因此这里的返回值必须与状态写入一致。
+ */
+describe("useSessionStream send 返回值契约", () => {
+  it("没有会话或文本为空时返回 false，且完全不发请求", async () => {
+    const { result, rerender } = renderStream(null);
+    await act(async () => {
+      expect(await result.current.send("没有会话")).toBe(false);
+    });
+    expect(mocks.send).not.toHaveBeenCalled();
+
+    rerender({ sessionId: "s-A" });
+    await act(async () => {
+      expect(await result.current.send("   ")).toBe(false);
+    });
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("同会话 202 返回 true，并同步写入占位消息", async () => {
+    const { result } = renderStream("s-A");
+    mocks.send.mockImplementation(async (_sessionId, input) => ({ commandId: input.commandId, status: "queued" }));
+
+    let accepted: boolean | void = undefined;
+    await act(async () => {
+      accepted = await result.current.send("正常提交");
+    });
+
+    expect(accepted).toBe(true);
+    expect(result.current.messages).toHaveLength(1);
+    expect(result.current.lastCommandId).not.toBeNull();
+  });
+
+  it("迟到代际的 202 返回 false：本机不把它算作当前会话已发送", async () => {
+    const { result, rerender } = renderStream("s-A");
+    const pending = deferred<QueuedCommand>();
+    mocks.send.mockReturnValue(pending.promise);
+
+    let sending!: Promise<boolean | void>;
+    act(() => {
+      sending = result.current.send("给 A 的提交");
+    });
+    const { commandId } = firstSendInput();
+
+    rerender({ sessionId: "s-B" });
+    await act(async () => {
+      pending.resolve({ commandId, status: "queued" });
+      expect(await sending).toBe(false);
+    });
+    expect(result.current.lastCommandId).toBeNull();
+    expect(result.current.messages).toHaveLength(0);
+  });
+
+  it("发送失败返回 false 而不是把异常抛给调用方，错误仍写入会话状态", async () => {
+    const { result } = renderStream("s-A");
+    mocks.send.mockRejectedValue(new Error("无法连接 Myrix BFF"));
+
+    let accepted: boolean | void = undefined;
+    await act(async () => {
+      accepted = await result.current.send("会失败");
+    });
+
+    expect(accepted).toBe(false);
+    expect(result.current.error).toBe("无法连接 Myrix BFF");
+    expect(result.current.sending).toBe(false);
+  });
+
+  it("A→B→A 之后调用 A 的旧 send 回调返回 false，且不发网络请求", async () => {
+    const { result, rerender } = renderStream("s-A");
+    const staleSendA = result.current.send;
+
+    rerender({ sessionId: "s-B" });
+    rerender({ sessionId: "s-A" });
+
+    mocks.send.mockResolvedValue({ commandId: "c-late", status: "queued" });
+    let accepted: boolean | void = undefined;
+    await act(async () => {
+      accepted = await staleSendA("迟到的旧 A 提交");
+    });
+
+    expect(accepted).toBe(false);
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(result.current.messages).toHaveLength(0);
   });
 });

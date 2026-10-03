@@ -20,8 +20,11 @@ export function isMemberRole(value: unknown): value is MemberRole {
 
 export type WorkStatus = "active" | "archived" | "deleted";
 
-export type SessionPreset = "novel-outline" | "novel-chapter" | "novel-bible";
+export type SessionPreset = "novel-assistant" | "novel-outline" | "novel-chapter" | "novel-bible";
 export const SESSION_PRESETS: readonly SessionPreset[] = [
+  // 统一创作助手（六工具全集）；新增 preset 必须同时改 0010 迁移的 check 约束。
+  "novel-assistant",
+  // 历史三 preset 必须保留：数据库里已有会话引用它们，且掩码不得扩大。
   "novel-outline",
   "novel-chapter",
   "novel-bible",
@@ -80,6 +83,7 @@ export type BibleAttributeValue = string | number | boolean | string[];
 export type BibleAttributes = Record<string, BibleAttributeValue>;
 
 export const SESSION_PRESET_VALUES: Record<SessionPreset, true> = {
+  "novel-assistant": true,
   "novel-outline": true,
   "novel-chapter": true,
   "novel-bible": true,

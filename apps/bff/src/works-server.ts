@@ -6,7 +6,7 @@ import type { PlatformIdentity } from "@myrix/contracts";
 import type { PlatformStore } from "@myrix/platform-store";
 import { ApiFailure } from "./ports";
 import { PostgresNovelRepository, TransactionBoundStore, throwApiError } from "./novel-store";
-import { isNovelTool, parseToolArguments, PRESET_TOOLS, type NovelToolName } from "@myrix/novel-protocol";
+import { isNovelTool, parseToolArguments, toolsForPreset, type NovelToolName } from "@myrix/novel-protocol";
 
 export interface CellCredential { tenantId: string; cellId: string; token: string }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -50,6 +50,8 @@ export function createWorksExecutor(store: PlatformStore, credentials: CellCrede
         // Locks remain held through the business write: revoke/disable cannot race past a successful check.
         const binding = await tx.trx.selectFrom("session_bindings").selectAll().where("id", "=", sessionId).forShare().executeTakeFirst();
         if (!binding || binding.cell_id !== cell.cellId || binding.status !== "active") throw new ApiFailure(403, "session_unavailable", "会话不属于此 Cell 或已停止");
+        // 归档**不**改工具权限：归档只整理历史，不停止任务。已在执行的回合继续写正文/
+        // 大纲/设定，Cell 的工具掩码只看 preset 与所有权，不看 archived_at。
         const member = await tx.trx.selectFrom("members").selectAll().where("user_id", "=", binding.owner_user_id).forShare().executeTakeFirst();
         const tenant = await tx.trx.selectFrom("tenants").selectAll().where("id", "=", cell.tenantId).forShare().executeTakeFirst();
         if (!member || tenant?.status !== "active" || (member.role !== "member" && member.role !== "admin")) throw new ApiFailure(403, "membership_unavailable", "租户或成员访问权限已失效");
@@ -57,8 +59,10 @@ export function createWorksExecutor(store: PlatformStore, credentials: CellCrede
         const decision = authorizePlatform({ actor, member: { tenantId: cell.tenantId, userId: actor.userId, role: member.role, status: member.status },
           action: "sessions:send", resource: { tenantId: cell.tenantId, ownerUserId: actor.userId, status: binding.status, revision: binding.revoked_revision }, expectedRevision: revision });
         if (decision.effect !== "allow") throw new ApiFailure(403, "forbidden", decision.reason);
-        const presetTools: readonly string[] = PRESET_TOOLS[binding.preset];
-        if (!presetTools?.includes(tool)) throw new ApiFailure(403, "tool_not_allowed", "当前助手无权使用此工具");
+        // 未知 preset（数据库里的历史值或人为写入）在**执行路径**上必须拒绝，
+        // 而不是回退到"全集"：这里直接取掩码，取不到就 403（fail-closed）。
+        const presetTools = toolsForPreset(binding.preset);
+        if (!presetTools || !presetTools.includes(tool)) throw new ApiFailure(403, "tool_not_allowed", "当前助手无权使用此工具");
         await sql`select set_config('myrix.actor_user_id', ${actor.userId}, true)`.execute(tx.trx);
         const repository = new PostgresNovelRepository(new TransactionBoundStore(store, { ...tx, actorUserId: actor.userId }));
         const wid = binding.work_id;
@@ -145,6 +149,8 @@ export function createBindingSnapshotReader(store: PlatformStore, credentials: C
         .innerJoin("tenants as t", "t.id", "b.tenant_id")
         .select(["b.id", "b.tenant_id", "b.owner_user_id", "b.work_id", "b.preset", "b.revoked_revision", "b.status", "m.role", "m.status as member_status"])
         .where("b.cell_id", "=", cell.cellId).where("b.status", "in", ["creating", "active"])
+        // 归档**不**改快照：归档只整理历史，不停止任务，Cell 的工具权限与活性租约
+        // 必须保持原样，否则归档会把一条仍在跑的会话从 Cell 的可服务主体里摘掉。
         .where("t.status", "=", "active").where("w.status", "=", "active").limit(10_001).execute();
       if (rows.length > 10_000) throw new ApiFailure(503, "snapshot_too_large", "Cell 会话授权快照超过首版容量限制");
       const bindings = rows.filter(row => authorizePlatform({

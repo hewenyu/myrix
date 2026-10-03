@@ -21,7 +21,13 @@ export function throwApiError(error: unknown): never {
   throw error;
 }
 export function toNovelSession(row: SessionBindingRecord): NovelSession {
-  return { id: row.id, workId: row.workId, preset: row.preset, status: row.status === "closed" ? "revoked" : row.status, createdAt: row.createdAt };
+  return {
+    id: row.id, workId: row.workId, preset: row.preset,
+    status: row.status === "closed" ? "revoked" : row.status,
+    createdAt: row.createdAt,
+    // 归档是展示元数据（不是 revoked）：列表必须把它原样带给 UI 以便分组。
+    archivedAt: row.archivedAt,
+  };
 }
 function toBible(row: BibleEntryRecord): BibleEntry {
   return { id: row.id, workId: row.workId, kind: row.kind === "character" || row.kind === "timeline" ? row.kind : "setting", title: row.name, text: row.summary, version: row.version, updatedAt: row.updatedAt };

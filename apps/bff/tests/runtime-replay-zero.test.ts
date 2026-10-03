@@ -218,7 +218,7 @@ function startBff(cell: ReplayCell, key: ReturnType<typeof generateTestKeyPair>)
   const facts: DeliveryFacts = {
     binding: {
       tenantId, id: sessionId, ownerUserId, workId, preset,
-      status: "active", revokedRevision: 1, cellId,
+      status: "active", revokedRevision: 1, cellId, archivedAt: null,
     },
     member: { status: "active", role: "member" },
     work: { ownerUserId, status: "active" },

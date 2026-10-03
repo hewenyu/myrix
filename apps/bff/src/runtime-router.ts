@@ -108,6 +108,8 @@ export interface DeliveryFacts {
     status: string;
     revokedRevision: number;
     cellId: string | null;
+    /** 归档时间（ISO8601）；`null` = 未归档。归档只是展示元数据：不停止任务、不撤权。 */
+    archivedAt: string | null;
   };
   member: { status: string; role: string } | undefined;
   work: { ownerUserId: string; status: string } | undefined;
@@ -197,6 +199,7 @@ function toNovelSession(binding: SessionBindingRecord): NovelSession {
     preset: binding.preset as NovelPreset,
     status: binding.status === "closed" ? "revoked" : binding.status,
     createdAt: binding.createdAt,
+    archivedAt: binding.archivedAt,
   };
 }
 
@@ -334,7 +337,7 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
     return store.withTenant({ tenantId }, async (tx) => {
       const row = await tx.trx
         .selectFrom("session_bindings")
-        .select(["id", "tenant_id", "owner_user_id", "work_id", "preset", "status", "revoked_revision", "cell_id"])
+        .select(["id", "tenant_id", "owner_user_id", "work_id", "preset", "status", "revoked_revision", "cell_id", "archived_at"])
         .where("id", "=", sessionId)
         .executeTakeFirst();
       if (!row) return undefined;
@@ -359,6 +362,7 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
           status: row.status,
           revokedRevision: row.revoked_revision,
           cellId: row.cell_id,
+          archivedAt: row.archived_at ? row.archived_at.toISOString() : null,
         },
         member: member ? { status: member.status, role: member.role } : undefined,
         work: work ? { ownerUserId: work.owner_user_id, status: work.status } : undefined,
@@ -714,6 +718,8 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
     if (facts.binding.status === "revoked") {
       return fail(command, "binding-revoked: 会话已撤权，不再投递该命令", { status: "failed", commandId: command.id, error: "binding-revoked", rev: facts.binding.revokedRevision });
     }
+    // 归档**不**参与投递判定：归档只整理历史，不停止已入队/已在执行的任务。
+    // 归档前入队的命令必须照常投给 Cell；归档只拒绝"归档之后的新 send"（见 enqueue）。
     const decision = authorizeDelivery(facts, { actorUserId: command.actorUserId, op: command.op });
     if (decision.effect !== "allow") {
       return fail(command, `授权拒绝：${decision.reason}`, { status: "failed", commandId: command.id, error: "forbidden", reason: decision.reason.slice(0, 300) });
@@ -1187,6 +1193,7 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString(),
       revokedAt: null,
+      archivedAt: facts.binding.archivedAt,
     };
   }
 
@@ -1197,6 +1204,12 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
     input: { commandId: string; text?: string },
   ): Promise<QueuedCommand> {
     const binding = await loadOwnedBinding(actor, sessionId);
+    // 归档只拒绝**新的 send**：会话仍可读（列表 / 事件流 / 完整历史），已入队的命令
+    // 照常执行，cancel 必须仍然可用（否则作者无法停止一条已在跑的任务）。
+    // 409（不是 403/410）：这是可逆的展示状态，不是授权或撤权结论；文案明确提示恢复。
+    if (op === "send" && binding.archivedAt !== null) {
+      throw new ApiFailure(409, "session_archived", "会话已归档，恢复后才能继续发送新消息");
+    }
     const body = enqueueBodyOf({ op, sessionId, commandId: input.commandId, ...(input.text === undefined ? {} : { text: input.text }) });
     try {
       const result = await commands.enqueue(actor.tenantId, actor.userId, {
@@ -1224,6 +1237,7 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
       throw new ApiFailure(404, "not_found", "会话不存在");
     }
     if (facts.binding.status === "revoked") throw new ApiFailure(410, "revoked", "会话已撤权");
+    // 归档**不**阻断事件流：历史必须可看，订阅（含为订阅触发的必要 resume）不受影响。
     if (facts.binding.status !== "active") throw new ApiFailure(409, "session_not_active", "会话尚未激活，请稍后重试");
     if (facts.tenantStatus !== "active") throw new ApiFailure(403, "forbidden", "租户已停用");
     if (!facts.member || facts.member.status !== "active") throw new ApiFailure(403, "forbidden", "当前成员已停用");
@@ -1289,6 +1303,27 @@ export function createRuntimeRouter(deps: RuntimeRouterDependencies): RuntimeRun
         await sessions.revoke(actor.tenantId, actor.userId, sessionId, binding.revokedRevision, "用户主动结束会话");
         dispatcher.wake();
         logger.info?.("myrix-bff runtime: 会话已撤权（数据库优先）", { sessionId });
+      } catch (error) {
+        return toApi(error);
+      }
+    },
+
+    /**
+     * 归档 / 恢复一条会话（展示元数据，不是撤权）。
+     *
+     * 归档只整理历史：不停止任务、不改 `status`/`rev`、不发 outbox、不使凭证失效。
+     * 归档期间唯一新增的边界是**拒绝新的 send**（409 `session_archived`，提示恢复）；
+     * cancel、事件流、工具调用、已入队命令与后台恢复都沿用正常路径。
+     *
+     * 授权全部在 `SessionsRepository.setArchived` 的同一事务里完成（所有者事实 +
+     * governance 判定 + CAS + 审计），路由不内联策略；这里只负责把 store 的错误
+     * 翻译成 HTTP，并把最新状态回给调用方（避免调用方再读一次导致的状态漂移）。
+     */
+    async archive(actor: PlatformIdentity, sessionId: string, archived: boolean): Promise<NovelSession> {
+      try {
+        const binding = await sessions.setArchived(actor.tenantId, actor.userId, sessionId, archived);
+        logger.info?.("myrix-bff runtime: 会话归档状态已更新", { sessionId, archived });
+        return toNovelSession(binding);
       } catch (error) {
         return toApi(error);
       }

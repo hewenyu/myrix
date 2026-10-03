@@ -1,5 +1,5 @@
 /**
- * `@myrix/novel` 的三个 preset 与提示词段落。
+ * `@myrix/novel` 的四个 preset 与提示词段落。
  *
  * 两条不可让步的规则（platform-plan-v2 §5.3、ADR-0017）：
  *
@@ -15,12 +15,23 @@
  * `@myrix/novel/preset-tools`，由它按 `config.tools` 注册对应工具、注册一段
  * 该助手专用的安全中文提示。这样工具定义只有一份，掩码在数据里。
  *
+ * 四个 preset 的关系：
+ *   * `novel-assistant` 是**统一创作助手**：六个工具全集，由系统提示指导它在
+ *     自然对话中自行判断"这次是大纲 / 正文 / 设定"任务，并**先读后 CAS 写**；
+ *     它不得谎称能创建章节、作品或设定条目（它只有这六个工具）。
+ *   * `novel-outline` / `novel-chapter` / `novel-bible` 是**历史受限 preset**，
+ *     掩码逐字不变：既有会话重放、显式选择它们时拿到的工具不扩大。
+ *
  * @module @myrix/novel/presets
  */
-import { PRESET_TOOLS, type NovelToolName } from './protocol.ts'
+import { PRESET_IDS, PRESET_TOOLS, type NovelToolName } from './protocol.ts'
 
-/** 三个 preset 的稳定 ID（首版接口基线，不得改名）。 */
-export const NOVEL_PRESETS = ['novel-outline', 'novel-chapter', 'novel-bible'] as const
+/**
+ * 四个 preset 的稳定 ID（首版接口基线不得改名；新增只能追加）。
+ *
+ * 顺序即 roster 顺序：统一助手在前，历史三 preset 保持原相对顺序。
+ */
+export const NOVEL_PRESETS = PRESET_IDS
 export type NovelPresetId = typeof NOVEL_PRESETS[number]
 
 /**
@@ -51,6 +62,37 @@ const READ_RULES = [
  * 让模型不要把缺失当成"可以随便猜一个作品"。
  */
 const PRESET_PROMPTS: Record<NovelPresetId, (trustedWorkId: string | undefined) => string> = {
+  'novel-assistant': (workId) => [
+    '你是本作品的**统一创作助手**，负责大纲、章节正文与设定圣经三类工作。只在本作品范围内工作。',
+    workId === undefined
+      ? '当前会话没有可用的作品绑定：不要假设任何作品内容。'
+      : `当前作品（服务端绑定，可信）：${workId}。不要请求或接受其他作品标识。`,
+    UNTRUSTED_CONTENT_RULE,
+    READ_RULES,
+    [
+      // ── 任务判断：不要求用户先选 preset，也不要反问"用哪个助手" ──
+      '用户不会也不需要在开始时选择助手类型：直接从自然语言判断这次要做什么，',
+      '需要时在对话中确认。判断规则：谈整体走向、章节安排、故事线 → 大纲任务；',
+      '谈某章的具体文字、续写、改写 → 正文任务；谈人物、地点、势力、时间线、物品、',
+      '概念等事实设定 → 设定任务。一次对话里可以先后做多类任务，做完一类再进入下一类。',
+      // ── 工具现实：六个工具，不能创建对象，绝不能谎称 ──
+      '你只有六个工具：get_outline / update_outline / get_chapter / save_chapter_draft / ',
+      'search_bible / update_bible_entry。你**不能**新建作品、新建章节、新建设定条目，',
+      '也不能删除任何内容或读取章节版本历史。用户要求这些时，如实说明当前不支持，',
+      '并给出在这六个工具范围内能做的替代方案（例如把新章节的构思写进大纲摘要、',
+      '把新设定先写成大纲中的条目文本），绝不假装已经创建、也不要说"已为你新建"。',
+      // ── 先读后写 + CAS ──
+      '保存大纲用 update_outline（完整新大纲文本），保存正文用 save_chapter_draft（指定已存在的',
+      'chapterId，文本是完整新正文而不是局部 diff），更新设定用 update_bible_entry（指定已存在的',
+      'entryId）。三者都必须带刚读到的 expectedVersion；没有先读到版本就不要写。',
+      '返回 conflict 时**不要覆盖**：先重新读取（get_outline / get_chapter / search_bible），',
+      '在最新版本上合并用户的意图，再重新保存；冲突时始终保留用户草稿。',
+      '保存成功（saved/duplicate）之前，不得声称任何内容已保存；保存成功后如实报告版本号。',
+      // ── 不确定就问，不编造 ──
+      '读到的内容不足以判断时，直接向用户提问，不要凭聊天摘要推断不存在的事实，',
+      '也不要为了"完成请求"而编造人物关系、时间线或既有设定。',
+    ].join(''),
+  ].join('\n'),
   'novel-outline': (workId) => [
     '你是小说创作助手，负责**大纲**。只在本作品范围内工作。',
     workId === undefined
@@ -102,6 +144,11 @@ export function presetPromptText(preset: NovelPresetId, trustedWorkId: string | 
 
 /** preset 的显示元数据。 */
 export const PRESET_META: Record<NovelPresetId, { name: string; description: string; order: number }> = {
+  'novel-assistant': {
+    name: '创作助手',
+    description: '统一助手：在自然对话中判断大纲 / 正文 / 设定任务，先读取再按版本保存；不代替你选择助手类型。',
+    order: 9,
+  },
   'novel-outline': { name: '小说大纲助手', description: '维护当前作品大纲：读取大纲与设定，按版本保存大纲。', order: 10 },
   'novel-chapter': { name: '小说章节助手', description: '撰写当前作品章节：读取大纲/章节/设定，按版本保存草稿。', order: 11 },
   'novel-bible': { name: '小说设定助手', description: '维护当前作品设定圣经：检索角色/设定/时间线并更新既有条目。', order: 12 },

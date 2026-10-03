@@ -406,11 +406,18 @@ function toSessionView(row: {
   return {
     id: row.id,
     workId: row.workId,
-    preset: row.preset,
+    // 该历史 demo 的 wire 只声明三个旧 preset；遇到新的 novel-assistant 时**显式拒绝**
+    // 而不是强转（views 是冻结给旧 BFF 的契约，静默透传会让类型与运行时不一致）。
+    preset: toLegacyPreset(row.preset),
     status: toSessionStatus(row.status),
     rev: row.revokedRevision,
     createdAt: row.createdAt,
   };
+}
+
+function toLegacyPreset(preset: SessionPreset): NovelSessionView["preset"] {
+  if (preset === "novel-outline" || preset === "novel-chapter" || preset === "novel-bible") return preset;
+  throw new Error(`works-service: preset ${preset} 不在历史 wire 契约内（该服务已被 apps/bff 取代）`);
 }
 
 /** 供 BFF 的 HTTP 边界使用：把 PlatformStoreError 映射成 `{ status, body }`，不泄漏 SQL。 */

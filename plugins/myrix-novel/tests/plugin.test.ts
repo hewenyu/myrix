@@ -12,8 +12,8 @@
 import { describe, expect, it } from 'vitest'
 import type { Principal } from '@myrix/principals'
 import { apply as applyNovel } from '../src/index.ts'
-import { PRESET_TOOLS } from '../src/protocol.ts'
-import { NOVEL_PRESETS } from '../src/presets.ts'
+import { NOVEL_TOOLS, PRESET_TOOLS } from '../src/protocol.ts'
+import { NOVEL_PRESETS, novelPresetDefinitions } from '../src/presets.ts'
 import { createNovelHarness, type NovelHarness } from './harness.ts'
 
 const ORIGIN = 'http://works.internal:8081'
@@ -63,12 +63,41 @@ function run(harness: NovelHarness, name: string, args: unknown, agent?: unknown
 }
 
 describe('myrix-novel：preset 与作用域', () => {
-  it('三个 preset 注册成功，roster 无 broken', async () => {
+  it('四个 preset 注册成功，roster 无 broken', async () => {
     const harness = await boot()
     try {
       const rows = await harness.ctx.agentPresets.list()
       expect(rows.map((row) => row.id).sort()).toEqual([...NOVEL_PRESETS].sort())
       for (const row of rows) expect(row.broken, row.id).toBeUndefined()
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('统一助手拿到六个工具全集；三个历史 preset 掩码逐字不变（不扩大）', async () => {
+    const harness = await boot()
+    try {
+      const assistant = await agentFor(harness, 'novel-assistant')
+      expect(harness.ctx.tools.schemas(assistant).map((schema) => schema.name).sort())
+        .toEqual([...NOVEL_TOOLS].sort())
+      expect(harness.ctx.tools.schemas(assistant)).toHaveLength(6)
+
+      // 历史三 preset：掩码与首版基线逐字一致 —— 新增统一助手不得顺带放宽它们。
+      const legacyExpected = {
+        'novel-outline': ['get_outline', 'update_outline', 'search_bible'],
+        'novel-chapter': ['get_outline', 'get_chapter', 'save_chapter_draft', 'search_bible'],
+        'novel-bible': ['get_outline', 'get_chapter', 'search_bible', 'update_bible_entry'],
+      } as const
+      for (const preset of ['novel-outline', 'novel-chapter', 'novel-bible'] as const) {
+        const agent = await agentFor(harness, preset)
+        const visible = harness.ctx.tools.schemas(agent).map((schema) => schema.name).sort()
+        expect(visible, preset).toEqual([...legacyExpected[preset]].sort())
+        // 反向：历史 preset 不得拿到它原来没有的工具（逐项断言，失败信息可读）。
+        for (const tool of NOVEL_TOOLS) {
+          const shouldHave = (legacyExpected[preset] as readonly string[]).includes(tool)
+          expect(visible.includes(tool), `${preset} / ${tool}`).toBe(shouldHave)
+        }
+      }
     } finally {
       await harness.dispose()
     }
@@ -83,6 +112,30 @@ describe('myrix-novel：preset 与作用域', () => {
           .toEqual([...PRESET_TOOLS[preset]].sort())
       }
       expect(harness.ctx.tools.schemas().map((schema) => schema.name)).toEqual([])
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('未知 preset 被拒绝：注册阶段抛错，未知名字不可能进 roster', async () => {
+    const harness = await boot()
+    try {
+      // 未知 preset 走 preset-tools 子插件：`applyPresetTools` 的 assertPreset 必须抛错。
+      const definition = novelPresetDefinitions().find((entry) => entry.id === 'novel-assistant')
+      expect(definition).toBeDefined()
+      await expect(
+        harness.createAgent({
+          sessionId: SID,
+          preset: 'novel-assistant',
+          principal: { sid: SID, tid: 't_1', sub: 'u_1', wid: 'w_1', preset: 'novel-assistant', rev: 1 },
+          definitionOverride: {
+            id: 'novel-assistant',
+            plugins: [{ id: 'row', name: `cordis:${'myrix-novel-preset-tools'}`, config: { preset: 'novel-unknown', tools: [...NOVEL_TOOLS] } }],
+          },
+        }),
+      ).rejects.toThrow()
+      // roster 里不会出现未知 id。
+      expect((await harness.ctx.agentPresets.list()).map((row) => row.id)).not.toContain('novel-unknown')
     } finally {
       await harness.dispose()
     }
@@ -274,6 +327,62 @@ describe('myrix-novel：提示与卸载', () => {
       const text = assembly.sections.map((section) => section.text).join('\n')
       expect(text).not.toContain('w_不该泄漏')
       expect(text).toContain('没有可用的作品绑定')
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('统一助手提示：指导自然判断任务、先读后写，且明确不可创建无工具对象', async () => {
+    const harness = await boot()
+    try {
+      const agent = await agentFor(harness, 'novel-assistant', { wid: 'w_助手' })
+      const assembly = await harness.ctx.systemPrompt.assemble({ agent, scope: agent })
+      const text = assembly.sections.map((section) => section.text).join('\n')
+      // 不需要用户选 preset：提示必须主动说明任务判断方式。
+      expect(text).toContain('用户不会也不需要在开始时选择助手类型')
+      expect(text).toContain('大纲任务')
+      expect(text).toContain('正文任务')
+      expect(text).toContain('设定任务')
+      // 工具现实：六个工具、不能创建对象、不能假装已创建。
+      expect(text).toContain('你只有六个工具')
+      expect(text).toContain('不能')
+      expect(text).toContain('新建作品、新建章节、新建设定条目')
+      expect(text).toContain('绝不假装已经创建')
+      // 先读后 CAS 写。
+      expect(text).toContain('expectedVersion')
+      expect(text).toContain('冲突时始终保留用户草稿')
+      expect(text).not.toContain(CREDENTIAL)
+      expect(text).not.toContain(ORIGIN)
+    } finally {
+      await harness.dispose()
+    }
+  })
+
+  it('统一助手在一个真实（替身模型）回合里能调用六个工具中的任意一个', async () => {
+    const harness = await boot()
+    try {
+      const agent = await agentFor(harness, 'novel-assistant')
+      let callIndex = 0
+      harness.adapter.script(() => {
+        callIndex += 1
+        return callIndex === 1
+          ? [
+              { type: 'block-start', index: 0, blockType: 'tool-call' },
+              { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'stub_assistant_1' as never, name: 'search_bible', arguments: '{"query":""}' } },
+              { type: 'usage', usage: { inputTokens: 3, outputTokens: 2 } },
+              { type: 'finish', reason: { kind: 'tool-calls' } },
+            ]
+          : [
+              { type: 'block-start', index: 0, blockType: 'text' },
+              { type: 'text-delta', index: 0, text: '已读取设定' },
+              { type: 'block-end', index: 0, block: { type: 'text', text: '已读取设定' } },
+              { type: 'usage', usage: { inputTokens: 4, outputTokens: 2 } },
+              { type: 'finish', reason: { kind: 'stop' } },
+            ]
+      })
+      agent.followup({ id: 'stub_assistant_msg' as never, role: 'user', content: [{ type: 'text', text: '这个世界的势力有哪些' }], source: { kind: 'user' } } as never)
+      await agent.whenIdle()
+      expect(harness.works.calls.map((call) => call.tool)).toEqual(['search_bible'])
     } finally {
       await harness.dispose()
     }

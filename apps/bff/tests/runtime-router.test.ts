@@ -32,7 +32,9 @@ import { migrateToLatest } from "../../../packages/platform-store/src/migrate";
 import type { CommandsTable, MigrationDatabase, PlatformDatabase, SessionBindingsTable } from "../../../packages/platform-store/src/schema";
 import type { Selectable } from "kysely";
 import { OutboxRepository } from "../../../packages/platform-store/src/repositories/outbox";
+import { PostgresNovelRepository } from "../src/novel-store";
 import { createStaticCellDirectory } from "../src/runtime-cells";
+import { CellCredentialRegistry, createBindingSnapshotReader } from "../src/works-server";
 import { createDriverHttpClient, type DriverSseFrame } from "../src/runtime-driver-client";
 import { createRuntimeRouter, RUNTIME_SERVICE_CAPABILITIES, receiptCommandId, subscribeCommandId, wireBodyOf, type RuntimeRuntime } from "../src/runtime-router";
 
@@ -276,6 +278,11 @@ describe.skipIf(!appUrl || !migrationUrl)("BFF runtime router against real Postg
         return await migration.selectFrom("session_bindings").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
       },
     };
+  }
+
+  /** 快照读取用的 Cell 凭据注册表（与 fixture 的 serviceToken/cellId 绑定）。 */
+  function credentialRegistry(fx: Fixture): CellCredentialRegistry {
+    return new CellCredentialRegistry([{ tenantId: fx.tenantId, cellId: fx.cellId, token: fx.serviceToken }]);
   }
 
   beforeAll(async () => {
@@ -609,6 +616,89 @@ describe.skipIf(!appUrl || !migrationUrl)("BFF runtime router against real Postg
       await migration.updateTable("members").set({ status: "active", disabled_at: null })
         .where("tenant_id", "=", fx.tenantId).where("user_id", "=", fx.owner.userId).execute();
     }
+  }, 30_000);
+
+  it("archives and restores a session without touching the revocation state", async () => {
+    const fx = await createFixture();
+    const sid = await fx.newBinding("active");
+    const created = await fx.runtime.archive(fx.owner, sid, true);
+    expect(created.archivedAt).not.toBeNull();
+    expect(created.status).toBe("active");
+
+    // 归档**不是**撤权：status / revoked_revision / revoked_at 都不动，也不发 outbox。
+    const row = await fx.bindingOf(sid);
+    expect(row).toMatchObject({ status: "active", revoked_revision: 1, revoked_at: null });
+    expect(row.archived_at).not.toBeNull();
+    expect(await migration.selectFrom("outbox_messages").select(["id"])
+      .where("tenant_id", "=", fx.tenantId).where("topic", "=", "session.revoke").execute()).toEqual([]);
+
+    // 归档期间唯一新增的边界是**新的 send**：409 session_archived，可读、提示恢复，
+    // 且不为这条被拒的消息落任何命令行。
+    await expect(fx.runtime.send(fx.owner, sid, { commandId: randomUUID(), text: "归档后发送" }))
+      .rejects.toMatchObject({ statusCode: 409, code: "session_archived" });
+    expect(await fx.commandsOf(sid)).toEqual([]);
+
+    // cancel **必须**仍然可用：作者要能停下一条已在跑的任务，否则归档会变成"只能看着它跑"。
+    await expect(fx.runtime.cancel(fx.owner, sid, randomUUID()))
+      .resolves.toMatchObject({ status: "queued" });
+    expect((await fx.commandsOf(sid)).map((command) => command.op)).toEqual(["cancel"]);
+
+    // 事件流**不**因归档中断：完整历史照常可读（这里用一条持久 user 消息证明订阅真的建立了）。
+    fx.driver.streamFrames = [
+      { id: 7, event: "user/message", data: { id: "m-archive", role: "user", content: [{ type: "text", text: "归档前的历史" }], source: { kind: "user" } } },
+    ];
+    const streaming = await fx.runtime.events(fx.owner, sid, 0, new AbortController().signal);
+    const collected = [];
+    for await (const event of streaming) collected.push(event);
+    expect(collected).toEqual([{ type: "user", seq: 7, text: "归档前的历史" }]);
+    expect(fx.driver.calls.some((call) => call.path.endsWith("/events"))).toBe(true);
+
+    // 归档仍然可读：会话列表里带着 archivedAt（不是被隐藏，也不是 revoked）。
+    const listed = await new PostgresNovelRepository(fx.store).listSessions(fx.owner, fx.workId);
+    const listedSession = listed.find((session) => session.id === sid);
+    expect(listedSession).toMatchObject({ id: sid, status: "active" });
+    expect(listedSession?.archivedAt).toBe(created.archivedAt);
+
+    // 恢复后立即可用：同一条会话可以重新发送。
+    const restored = await fx.runtime.archive(fx.owner, sid, false);
+    expect(restored.archivedAt).toBeNull();
+    await expect(fx.runtime.send(fx.owner, sid, { commandId: randomUUID(), text: "恢复后发送" }))
+      .resolves.toMatchObject({ status: "queued" });
+  }, 30_000);
+
+  it("delivers a command that was enqueued before the archive", async () => {
+    const fx = await createFixture();
+    const sid = await fx.newBinding("active");
+    const commandId = randomUUID();
+    await fx.runtime.send(fx.owner, sid, { commandId, text: "归档前已入队" });
+    // 归档只整理历史，不停止任务：归档前入队的命令在归档后必须照常投给 cell。
+    await fx.runtime.archive(fx.owner, sid, true);
+    fx.driver.post({ status: "accepted", commandId, bootId: "boot-fixed-1" });
+
+    const round = await fx.runtime.dispatcher.dispatchOnce();
+    expect(round).toMatchObject({ claimed: 1, settled: 1, failed: 0 });
+    const row = (await fx.commandsOf(sid))[0]!;
+    expect(row.status).toBe("succeeded");
+    // 真的 POST 给了 cell（而不是像旧实现那样本地判 archived-binding 失败）。
+    expect(fx.driver.calls.filter((call) => call.method === "POST" && call.path === "/v1/commands").length).toBe(1);
+  }, 30_000);
+
+  it("keeps archived sessions inside the Cell authorization snapshot", async () => {
+    const fx = await createFixture();
+    const sid = await fx.newBinding("active");
+    const snapshot = createBindingSnapshotReader(fx.store, credentialRegistry(fx));
+    const before = await snapshot(`Bearer ${fx.serviceToken}`, fx.cellId);
+    expect(before.bindings.map((binding) => binding.sid)).toContain(sid);
+
+    // 归档不改 Cell 工具权限/活性租约：快照必须原样包含该会话，否则归档会把一条
+    // 仍在执行的会话从 Cell 的可服务主体里摘掉。
+    await fx.runtime.archive(fx.owner, sid, true);
+    const after = await snapshot(`Bearer ${fx.serviceToken}`, fx.cellId);
+    expect(after.bindings.map((binding) => binding.sid)).toContain(sid);
+
+    await fx.runtime.archive(fx.owner, sid, false);
+    const restored = await snapshot(`Bearer ${fx.serviceToken}`, fx.cellId);
+    expect(restored.bindings.map((binding) => binding.sid)).toContain(sid);
   }, 30_000);
 
   it("enqueues only durable commands and refuses a reused commandId with different content", async () => {

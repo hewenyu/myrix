@@ -7,6 +7,7 @@ import type { PlatformIdentity } from "@myrix/contracts";
 import { PlatformStore } from "../../../packages/platform-store/src/store";
 import { createGovernanceAuthorizer } from "../../../packages/platform-store/src/authz";
 import { migrateToLatest } from "../../../packages/platform-store/src/migrate";
+import { SessionsRepository } from "../../../packages/platform-store/src/repositories/bindings";
 import type { MigrationDatabase, PlatformDatabase } from "../../../packages/platform-store/src/schema";
 import { PostgresNovelRepository } from "../src/novel-store";
 import { CellCredentialRegistry, createWorksExecutor, createBindingSnapshotReader, loadIdentity } from "../src/works-server";
@@ -132,6 +133,61 @@ describe.skipIf(!appUrl || !migrationUrl)("BFF real nonowner PostgreSQL integrat
     }
     await expect(saving).resolves.toMatchObject({ status: "saved", version: 2 });
   }, 10_000);
+  it("archives and restores a session: snapshot, tool executor and listing agree", async () => {
+    const archiveWorkId = (await repository.createWork(owner, { title: "作品 归档", description: "" })).id;
+    const archiveSid = randomUUID();
+    await migration.insertInto("session_bindings").values({
+      tenant_id: tenantId, id: archiveSid, owner_user_id: owner.userId, work_id: archiveWorkId,
+      preset: "novel-assistant", policy_revision: "test-v1", cell_id: "test-cell", status: "active", revoked_revision: 1,
+    }).execute();
+    const readSnapshot = createBindingSnapshotReader(store, new CellCredentialRegistry([{ tenantId, cellId: "test-cell", token }]));
+    const snapshotIds = async () => (await readSnapshot(`Bearer ${token}`, "test-cell")).bindings.map((binding) => binding.sid);
+
+    // 统一助手 preset 是六工具全集：以前只属于历史 preset 的工具现在同一会话都可用。
+    await expect(execute(`Bearer ${token}`, archiveSid, 1, "update_outline", { text: "统一助手写大纲", expectedVersion: 0 }))
+      .resolves.toMatchObject({ status: "saved" });
+    expect(await snapshotIds()).toContain(archiveSid);
+
+    // 归档（所有者本人）：只整理历史，不改工具权限/快照；列表仍可读并带 archivedAt。
+    const archived = await repository.listSessions(owner, archiveWorkId);
+    expect(archived.find((session) => session.id === archiveSid)?.archivedAt).toBeNull();
+    const sessions = new SessionsRepository(store);
+    const archivedRow = await sessions.setArchived(tenantId, owner.userId, archiveSid, true);
+    expect(archivedRow.archivedAt).not.toBeNull();
+    // 快照与工具权限都不因归档改变：归档不停止任务，Cell 仍要能服务这条会话。
+    expect(await snapshotIds()).toContain(archiveSid);
+    await expect(execute(`Bearer ${token}`, archiveSid, 1, "get_outline", {}))
+      .resolves.toMatchObject({ version: 1 });
+    await expect(execute(`Bearer ${token}`, archiveSid, 1, "update_outline", { text: "归档期间继续写", expectedVersion: 1 }))
+      .resolves.toMatchObject({ status: "saved", version: 2 });
+    const listed = await repository.listSessions(owner, archiveWorkId);
+    expect(listed.find((session) => session.id === archiveSid)).toMatchObject({ status: "active", archivedAt: archivedRow.archivedAt });
+
+    // 归档会话仍可被所有者撤权（DELETE /sessions/:id 的存储路径）：
+    // 归档与撤权正交，撤权是终态且必须成功（否则会撞上数据库 23514 → 500）。
+    const revokedAfterArchive = await sessions.revoke(tenantId, owner.userId, archiveSid, 1, "归档后结束会话");
+    expect(revokedAfterArchive).toMatchObject({ status: "revoked", revokedRevision: 2 });
+    // 撤权后归档接口一律 410（终态不可变）。
+    await expect(sessions.setArchived(tenantId, owner.userId, archiveSid, false)).rejects.toMatchObject({ code: "revoked", httpStatus: 410 });
+
+    // 非所有者（含管理员）不能归档/恢复：统一 not_found（不泄漏存在性）。
+    const standalone = randomUUID();
+    await migration.insertInto("session_bindings").values({
+      tenant_id: tenantId, id: standalone, owner_user_id: owner.userId, work_id: archiveWorkId,
+      preset: "novel-assistant", policy_revision: "test-v1", cell_id: "test-cell", status: "active", revoked_revision: 1,
+    }).execute();
+    await expect(sessions.setArchived(tenantId, admin.userId, standalone, true)).rejects.toMatchObject({ code: "not_found", httpStatus: 404 });
+    await expect(sessions.setArchived(foreign.tenantId, foreign.userId, standalone, true)).rejects.toMatchObject({ code: "not_found", httpStatus: 404 });
+    // 恢复：快照仍在、工具调用照旧；rev 与 status 全程未变。
+    await sessions.setArchived(tenantId, owner.userId, standalone, true);
+    expect(await snapshotIds()).toContain(standalone);
+    await sessions.setArchived(tenantId, owner.userId, standalone, false);
+    expect(await snapshotIds()).toContain(standalone);
+    expect(await repository.listSessions(owner, archiveWorkId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: standalone, status: "active", archivedAt: null }),
+    ]));
+  }, 30_000);
+
   it("revocation and membership disabling deny the next operation without cached authority", async () => {
     await migration.updateTable("session_bindings").set({ status: "revoked", revoked_revision: 2, revoked_at: new Date() }).where("id", "=", sid).execute();
     await expect(execute(`Bearer ${token}`, sid, 1, "get_outline", {})).rejects.toMatchObject({ statusCode: 403 });

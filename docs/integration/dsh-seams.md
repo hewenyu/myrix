@@ -29,7 +29,7 @@ Cell 的运行时装配是**逐行显式**的，没有 `dsh-base`、shell、fs�
 | `myrix-binding-lease` | [`@myrix/binding-lease`](../../plugins/myrix-binding-lease/src/index.ts) | `ctx.bindingLease`：主体活性租约 + 六工具策略快照的**唯一生产者** | `agent/created`（`ctx.serial`）、`ctx.effect` 生命周期 |
 | `myrix-runtime-driver` | [`@myrix/runtime-driver`](../../plugins/myrix-runtime-driver/src/index.ts) | `POST /v1/commands`、SSE、撤权、drain/idle、`GET /v1/ready` | `ctx.webServer.register()`、`ctx.agents.create()/resume()`、`ctx.sessions`、`ctx.agentPresets.mount()`、`ctx.sessionPersistence` |
 | `myrix-llm-gateway` | [`@myrix/llm-gateway`](../../plugins/myrix-llm-gateway/src/index.ts) | 模型路由：每次调用都经企业网关并携带会话归因 | `ctx.llm.registerAdapter()`、`ctx.principals.require()` |
-| `myrix-novel` | [`@myrix/novel`](../../plugins/myrix-novel/src/index.ts) | 小说纵向能力：`ctx.novelStore` 与三个 preset（工具只在该 preset 作用域内注册） | `ctx.tools.register()`、`ctx.systemPrompt.section()`、`ctx.agentPresets.register()` |
+| `myrix-novel` | [`@myrix/novel`](../../plugins/myrix-novel/src/index.ts) | 小说纵向能力：`ctx.novelStore` 与四个 preset（统一创作助手 + 三个历史受限 preset，工具只在该 preset 作用域内注册） | `ctx.tools.register()`、`ctx.systemPrompt.section()`、`ctx.agentPresets.register()` |
 
 周边入口：
 
@@ -42,7 +42,8 @@ Cell 的运行时装配是**逐行显式**的，没有 `dsh-base`、shell、fs�
 - BFF 向 Cell 提供的绑定快照端点：`GET /internal/v1/cells/:cellId/bindings`
   （[apps/bff/src/works-server.ts](../../apps/bff/src/works-server.ts)），由
   [myrix-binding-lease](../../plugins/myrix-binding-lease/src/index.ts) 消费。
-- 会话 preset 路径：BFF 在 `POST /works/:workId/sessions` 选定 `novel-*` preset，写进绑定与凭证，
+- 会话 preset 路径：BFF 在 `POST /works/:workId/sessions` 选定 preset（浏览器默认
+  `novel-assistant`，也可显式传三个历史 preset），写进绑定与凭证，
   驱动在 `setup` 内 `mountPreset`；`agentPresets` 的 `default` 仍是 `myrix-empty`，
   没有会话绑定的一段预设拿不到小说工具。
 
@@ -54,7 +55,7 @@ Cell 的运行时装配是**逐行显式**的，没有 `dsh-base`、shell、fs�
 | `ctx.tools.guard()` | 单调兜底拒绝（只能收紧） | `packages/core/tools/src/index.ts` |
 | `ctx.tools.register()` / `ctx.tools.schemas(agent)` | 工具注册与按作用域可见性 | 同文件 |
 | `ctx.systemPrompt.section()` | 提示段落（工作区/作品约束） | `packages/core/system-prompt/` |
-| `ctx.agentPresets.register()` / `mount()` / `composedPreset()` | 三个助手 preset 的注册与挂载 | `packages/preset/agent-preset-registry/` |
+| `ctx.agentPresets.register()` / `mount()` / `composedPreset()` | 四个助手 preset 的注册与挂载 | `packages/preset/agent-preset-registry/` |
 | `agent/created`（serial 事件） | 创建竞态时刷新绑定租约 | `packages/core/agent/src/runtime-types.ts` |
 | `ctx.webServer.register()` | Cell HTTP 载体（`dsh-host-webserver`，不是 `dsh-web-app`） | `packages/host/webserver/` |
 | `ctx.llm.registerAdapter()` | 模型适配器接入，经企业网关转发 | `packages/llm/` |

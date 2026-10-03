@@ -26,7 +26,7 @@ driver HTTP 客户端、SSE 白名单投影，以及 CLI 配置工厂与装配�
 `apps/bff/src/{server,ports,novel-store,works-server,auth,config}.ts`、root 配置、`vendor/**`、`plugins/**`。
 没有新增迁移、没有新增表、没有改动既有表或 RLS 策略。
 
-## 1. `RuntimeRouter` 的五个方法
+## 1. `RuntimeRouter` 的六个方法
 
 接口定义在 [`apps/bff/src/ports.ts`](../../apps/bff/src/ports.ts)。语义与 [bff-api.md](bff-api.md) 的浏览器契约、[business.md](../business.md) 的业务对象与授权链对齐：
 **平台 `queued` 只表示 DB 持久入队；cell `accepted` 只表示 inbox + flush；回复只能从事件流观察。**
@@ -34,10 +34,11 @@ driver HTTP 客户端、SSE 白名单投影，以及 CLI 配置工厂与装配�
 | 方法 | 行为 | 失败语义 |
 |---|---|---|
 | `createSession(actor, workId, preset)` | 解析该租户的 cell placement，然后 `SessionsRepository.create`：**绑定 + create 命令同一事务**；`status` 返回 `creating`，`cell_id` 落库 | 无 placement → 503 `cell_unplaced`；preset/作品/成员不合法 → 仓储层 4xx |
-| `send(actor, sid, {commandId,text})` | `CommandsRepository.enqueue(op='send')`，正文 `{op,sid,commandId,text}`；成功后唤醒投递循环 | 非 owner → 404；rev 不一致 → 409；同 commandId 换正文 → 409；该命令此前已 failed/dead → 409 `command_failed` |
-| `cancel(actor, sid, commandId)` | 同上，`op='cancel'`、正文 `{op,sid,commandId}` | 同上 |
+| `send(actor, sid, {commandId,text})` | `CommandsRepository.enqueue(op='send')`，正文 `{op,sid,commandId,text}`；成功后唤醒投递循环 | 非 owner → 404；rev 不一致 → 409；同 commandId 换正文 → 409；该命令此前已 failed/dead → 409 `command_failed`；会话已归档 → 409 `session_archived`（不产生命令行） |
+| `cancel(actor, sid, commandId)` | 同上，`op='cancel'`、正文 `{op,sid,commandId}`；归档不阻止取消 | 同上 |
+| `archive(actor, sid, archived)` | `SessionsRepository.setArchived`：同一事务内做所有者事实 + `authorizeTx` + CAS，只写 `archived_at`，**不**动 status/rev、不写 outbox、不入队 | 非 owner（含管理员/跨租户）→ 404；并发改归档态 → 409；已撤权 → 410 |
 | `revoke(actor, sid)` | `SessionsRepository.revoke`：**数据库优先**（status=revoked + rev+1 + 同事务写 `session.revoke` outbox），成功即返回；通知 cell 由 outbox 退避重试 | 非 owner → 404；rev 竞争 → 409 |
-| `events(actor, sid, after, signal)` | 先授权再解析 cell/`ready` 取 bootId，签发 `op=subscribe` 凭证，打开 driver 事件流并**白名单投影**；流上持续复核当前态 | 非 owner → 404；已撤权 → 410；cell 未就绪 → 503；driver 拒凭证 → 502 |
+| `events(actor, sid, after, signal)` | 先授权再解析 cell/`ready` 取 bootId，签发 `op=subscribe` 凭证，打开 driver 事件流并**白名单投影**；流上持续复核当前态；归档不阻断订阅或必要 resume | 非 owner → 404；已撤权 → 410；cell 未就绪 → 503；driver 拒凭证 → 502 |
 
 `createSession` 不返回 `active`。`creating → active` 只发生在 **create 命令真的拿到 driver 回执之后**
 （`SessionsRepository.markActive`，需要 `session.activate` 能力）。因此"网络不通"永远不可能被读成"会话已激活"。

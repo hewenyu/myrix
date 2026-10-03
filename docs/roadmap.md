@@ -17,6 +17,8 @@
 下列能力已在源码中就位；**本地链路的既有验收记录**见
 [本地开发指南](<implementation/local-development.md>) 与
 [模块边界评审](<reviews/module-boundaries-2026-10.md>)（记录的是当时结论，不等于本次复跑）。
+其中统一创作助手与会话归档的前端/浏览器/真实模型验收仍待执行，见
+[验证指南](<testing/acceptance.md>)。
 
 - [x] 持久化 BFF：OIDC/开发登录、Cookie/CSRF/Origin、浏览器 API、SSE 投影
       （[bff-api.md](<implementation/bff-api.md>)、[ADR 0013](<adr/0013-bff-authentication.md>)）。
@@ -26,8 +28,10 @@
       （[cell.patch.yml](<../bundles/myrix-base/cell.patch.yml>)、[ADR 0014](<adr/0014-cell-lifecycle.md>)）。
 - [x] 会话绑定 + 命令幂等 + 短期签名 grant + 恢复
       （[ADR 0019](<adr/0019-cell-binding-leases.md>)、[ADR 0028](<adr/0028-runtime-session-recovery.md>)）。
-- [x] 六个小说工具与三个预设，工具只在 preset 作用域注册
-      （[business.md](<business.md>)、[ADR 0017](<adr/0017-novel-tools-boundary.md>)）。
+- [x] 六个小说工具、统一创作助手与三个历史受限预设，工具只在 preset 作用域注册
+      （[business.md](<business.md>)、[ADR 0017](<adr/0017-novel-tools-boundary.md>)、[ADR 0034](<adr/0034-novel-assistant-and-session-archive.md>)）。
+- [x] 会话归档/恢复：展示元数据（不撤权、不停止任务），只拒绝新的 send
+      （[ADR 0034](<adr/0034-novel-assistant-and-session-archive.md>)）。
 - [x] 模型网关只讲 OpenAI Responses，禁止 `chat/completions`，无兼容入口
       （[ADR 0023](<adr/0023-responses-gateway.md>)）。
 - [x] 平台授权纯函数化、deny 覆盖、畸形条件 fail-closed、角色按租户分区
