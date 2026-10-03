@@ -30,6 +30,11 @@ test('public documentation links exist and never depend on private local evidenc
       const location = `${relative(root, file)} → ${target}`;
       if (local.startsWith('../') || /^(?:data\/|docs\/local\/|\.team\/|\.agents\/skills\/myrix-deploy\/)/.test(local)) {
         problems.push(`private/outside link: ${location}`);
+      } else if (local.startsWith('vendor/deepseek-harness/')) {
+        // CI intentionally does not initialize the optional source submodule.
+        // Reject inner-file links even when the developer has it checked out;
+        // use a pinned upstream URL instead. The gitlink directory itself is OK.
+        problems.push(`optional submodule content link (use a pinned upstream URL): ${location}`);
       } else if (!existsSync(path)) problems.push(`missing: ${location}`);
     }
   }

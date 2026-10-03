@@ -98,4 +98,4 @@ pnpm build:web
 
 只读[上游子模块](<vendor/deepseek-harness/>)锁定 `639ed015397290b3745d163aafe02ffee4aa3f84`，运行 CLI 使用独立锁定的 npm `@deepseek-ai/dsh@0.2.0-rc.2`；同版本号不证明两份产物逐字节一致，详见[运行时依赖](<docs/development/runtime-dependencies.md>)。
 
-本仓库采用 **Apache-2.0**（[LICENSE](<LICENSE>)、[NOTICE](<NOTICE>)）；上游 DSH 为 [MIT](<vendor/deepseek-harness/LICENSE>)。分发时保留双方许可与版权声明，并标注修改；商标权不在授权范围内，不暗示上游官方背书。
+本仓库采用 **Apache-2.0**（[LICENSE](<LICENSE>)、[NOTICE](<NOTICE>)）；上游 DSH 为 [MIT](<https://github.com/hewenyu/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/LICENSE>)。分发时保留双方许可与版权声明，并标注修改；商标权不在授权范围内，不暗示上游官方背书。
