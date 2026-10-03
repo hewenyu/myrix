@@ -7,6 +7,21 @@ import { BibleEditor, BibleNav } from "../src/panels/BiblePanel";
 import type { DraftState } from "../src/state/draft";
 import type { DraftEditor } from "../src/state/useDraft";
 
+// Tiptap 的 DOM 机制不是本测试的对象；这里核对 Manuscript 是否把纯文本原文交给编辑器。
+vi.mock("../src/components/PlainTextEditor", () => ({
+  PlainTextEditor: ({
+    value,
+    onChange,
+    ariaLabel,
+  }: {
+    value: string;
+    onChange: (text: string) => void;
+    ariaLabel: string;
+  }) => (
+    <textarea aria-label={ariaLabel} value={value} onChange={(event) => onChange(event.target.value)} />
+  ),
+}));
+
 const entry: BibleEntry = {
   id: "b1",
   workId: "w1",
@@ -134,6 +149,35 @@ describe("BibleEditor 冲突处理", () => {
   it("无选中条目且无草稿时给出可选择提示", () => {
     renderEditor(makeEditor({ base: null, server: null, text: "", conflict: null, notice: null }), null);
     expect(screen.getByText("选择一个条目进行编辑。")).toBeDefined();
+  });
+});
+
+describe("BibleEditor 阅读优先", () => {
+  function cleanState(text = "已保存的条目正文"): State {
+    return {
+      base: { ...entry, text, version: 1 },
+      server: null,
+      text,
+      conflict: null,
+      notice: null,
+    };
+  }
+
+  it("已有内容且无草稿时默认阅读，点“编辑原文”才挂载编辑器且不改写原文", async () => {
+    const user = userEvent.setup();
+    const editor = makeEditor(cleanState(), { dirty: false, conflict: null });
+    renderEditor(editor);
+
+    expect(screen.getByRole("button", { name: "阅读" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "编辑原文" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByLabelText("条目内容（纯文本）")).toBeNull();
+    expect(screen.getByRole("heading", { level: 1, name: "主角" })).toBeDefined();
+
+    await user.click(screen.getByRole("button", { name: "编辑原文" }));
+    expect((screen.getByLabelText("条目内容（纯文本）") as HTMLTextAreaElement).value).toBe(
+      "已保存的条目正文",
+    );
+    expect(editor.setText).not.toHaveBeenCalled();
   });
 });
 

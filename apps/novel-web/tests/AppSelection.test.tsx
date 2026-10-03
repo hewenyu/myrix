@@ -199,6 +199,22 @@ function assistant(): HTMLElement {
   return screen.getByRole("region", { name: "创作助手" });
 }
 
+/**
+ * 文稿阅读/编辑两种模式的 aria-label：阅读态是 `${label}阅读`，编辑态是 `label`。
+ * 用前缀匹配两者，避免测试为了找“正文在不在”而假设某一种模式。
+ */
+function manuscriptPattern(label: string): RegExp {
+  return new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
+}
+
+function findManuscript(label: string): Promise<HTMLElement> {
+  return screen.findByLabelText(manuscriptPattern(label));
+}
+
+function queryManuscript(label: string): HTMLElement | null {
+  return screen.queryByLabelText(manuscriptPattern(label));
+}
+
 /** 历史列表里的会话条目（统一 Agent 显示为“创作 Agent · 序号”）。 */
 function historyItem(index: number): HTMLElement {
   return within(assistant()).getByRole("button", { name: new RegExp(`创作 Agent · ${index}`) });
@@ -320,7 +336,7 @@ describe("App 登录 → 书架 → 开书 → 返回书架 → 切书", () => {
 
     // 开第一本：有章节 → 首开建议选中第一项，中栏直接显示正文。
     await openBook(user, "作品一");
-    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await findManuscript("章节正文：第一章");
     expect(screen.getByRole("button", { name: "章节" })).toHaveAttribute("aria-pressed", "true");
     expect(within(screen.getByRole("navigation", { name: "书内目录" })).getByRole("button", { name: /第一章/ })).toHaveAttribute("aria-current", "true");
 
@@ -340,8 +356,8 @@ describe("App 登录 → 书架 → 开书 → 返回书架 → 切书", () => {
 
     // 开第二本：显示的是它自己的章，不是上一本的。
     await openBook(user, "作品二");
-    expect(await screen.findByLabelText("章节正文：乙章")).toBeDefined();
-    expect(screen.queryByLabelText("章节正文：第一章")).toBeNull();
+    await findManuscript("章节正文：乙章");
+    expect(queryManuscript("章节正文：第一章")).toBeNull();
 
     // 会话选择按作品隔离：作品二还没有任何会话。
     await openHistory(user);
@@ -356,7 +372,7 @@ describe("App 登录 → 书架 → 开书 → 返回书架 → 切书", () => {
     await expectShelf();
 
     await openBook(user, "作品二");
-    await waitFor(() => expect(screen.getByLabelText("作品大纲")).toBeDefined());
+    await findManuscript("作品大纲");
     expect(screen.getByRole("button", { name: "大纲" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "章节" })).toHaveAttribute("aria-pressed", "false");
   });
@@ -377,7 +393,7 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
 
     // 创建在途时用户先开了作品一。
     await openBook(user, "作品一");
-    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await findManuscript("章节正文：第一章");
 
     workItems = [...workItems, W3];
     await act(async () => {
@@ -385,7 +401,7 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
     });
 
     // 迟到的回包属于上一条选择：不抢走当前的书。
-    expect(screen.getByLabelText("章节正文：第一章")).toBeDefined();
+    expect(queryManuscript("章节正文：第一章")).not.toBeNull();
     expect(screen.queryByRole("heading", { name: /我的书架/ })).toBeNull();
 
     // 但它仍然落进书架列表（结果不被丢弃，只是不抢选择）。
@@ -403,7 +419,7 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
     mocks.sessionsCreate.mockReturnValueOnce(gate.promise);
 
     await openBook(user, "作品二");
-    expect(await screen.findByLabelText("章节正文：乙章")).toBeDefined();
+    await findManuscript("章节正文：乙章");
     await user.type(screen.getByLabelText("消息输入"), "写个开头");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(mocks.sessionsCreate).toHaveBeenCalledWith("w2", "novel-assistant"));
@@ -411,7 +427,7 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
     // 创建在途时切回作品一。
     await backToShelf(user);
     await openBook(user, "作品一");
-    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await findManuscript("章节正文：第一章");
 
     await act(async () => {
       gate.resolve(session("s-late", "w2"));
@@ -432,17 +448,17 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
     mocks.sessionsCreate.mockReturnValueOnce(gate.promise);
 
     await openBook(user, "作品一");
-    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await findManuscript("章节正文：第一章");
     await user.type(screen.getByLabelText("消息输入"), "第一条");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(mocks.sessionsCreate).toHaveBeenCalledWith("w1", "novel-assistant"));
 
     await backToShelf(user);
     await openBook(user, "作品二");
-    expect(await screen.findByLabelText("章节正文：乙章")).toBeDefined();
+    await findManuscript("章节正文：乙章");
     await backToShelf(user);
     await openBook(user, "作品一");
-    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await findManuscript("章节正文：第一章");
 
     await act(async () => {
       gate.resolve(session("s-late", "w1"));
@@ -460,7 +476,7 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
     await expectShelf();
 
     await openBook(user, "作品一");
-    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await findManuscript("章节正文：第一章");
 
     await openHistory(user);
     await user.click(await findHistoryItem(1));
@@ -500,7 +516,7 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
     await expectShelf();
 
     await openBook(user, "作品一");
-    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await findManuscript("章节正文：第一章");
 
     await openHistory(user);
     await user.click(await findHistoryItem(1));
@@ -535,7 +551,7 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
     mocks.chaptersCreate.mockReturnValueOnce(gate.promise);
 
     await openBook(user, "作品二");
-    expect(await screen.findByLabelText("作品大纲")).toBeDefined();
+    await findManuscript("作品大纲");
     // 一章都没有：新建表单按需直接展开。
     await user.type(screen.getByLabelText("新章节标题"), "迟到的章节");
     await user.click(screen.getByRole("button", { name: "新建章节" }));
@@ -544,15 +560,58 @@ describe("App 代际归属：迟到的异步回包不抢用户的新选择", () 
     // 创建在途时切到作品一：WorkspacePane 按 workId 重建，本地章节选择属于 w2 实例。
     await backToShelf(user);
     await openBook(user, "作品一");
-    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await findManuscript("章节正文：第一章");
 
     await act(async () => {
       gate.resolve(chapter("c-late", "w2", "迟到的章节"));
     });
 
     // 作品一仍旧显示自己的第一章：迟到的 w2 章节既不被选中，也不会被读取。
-    expect(screen.getByLabelText("章节正文：第一章")).toBeDefined();
+    expect(queryManuscript("章节正文：第一章")).not.toBeNull();
     expect(screen.queryByText(/迟到的章节/)).toBeNull();
     expect(mocks.chaptersGet.mock.calls.some(([, chapterId]) => chapterId === "c-late")).toBe(false);
+  });
+});
+
+describe("App 专注模式与移动切换", () => {
+  it("移动切换区用“助手”标识助手栏（不再用 Agent）", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await expectShelf();
+    await openBook(user, "作品一");
+    await findManuscript("章节正文：第一章");
+
+    const switcher = screen.getByRole("navigation", { name: "创作区域" });
+    const tab = within(switcher).getByRole("button", { name: "助手" });
+    expect(tab).toHaveAttribute("aria-pressed", "false");
+    expect(within(switcher).queryByRole("button", { name: "Agent" })).toBeNull();
+
+    await user.click(tab);
+    expect(tab).toHaveAttribute("aria-pressed", "true");
+    expect(assistant()).toBeDefined();
+  });
+
+  it("专注写作只隐藏不卸载：助手草稿与正文都保留，退出后仍在", async () => {
+    const user = userEvent.setup();
+    const { container } = renderApp();
+    await expectShelf();
+    await openBook(user, "作品一");
+    await findManuscript("章节正文：第一章");
+
+    await user.type(screen.getByLabelText("消息输入"), "专注期间写的草稿");
+    await user.click(screen.getByRole("button", { name: "专注写作" }));
+
+    const layout = container.querySelector(".studio-layout");
+    expect(layout).toHaveClass("is-focused");
+    expect(screen.getByRole("button", { name: "退出专注" })).toBeDefined();
+    // 隐藏不卸载：助手与正文仍挂载，未发送草稿与编辑器状态都不丢。
+    expect(assistant()).toBeDefined();
+    expect((screen.getByLabelText("消息输入") as HTMLTextAreaElement).value).toBe("专注期间写的草稿");
+    expect(queryManuscript("章节正文：第一章")).not.toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "退出专注" }));
+    expect(layout).not.toHaveClass("is-focused");
+    expect((screen.getByLabelText("消息输入") as HTMLTextAreaElement).value).toBe("专注期间写的草稿");
+    expect(queryManuscript("章节正文：第一章")).not.toBeNull();
   });
 });

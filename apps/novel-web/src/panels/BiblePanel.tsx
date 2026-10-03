@@ -3,6 +3,8 @@ import { useState } from "react";
 
 import { Banner, EmptyHint } from "../components/common";
 import { Icon } from "../components/Icon";
+import { Manuscript } from "../components/Manuscript";
+import { ReadingContent } from "../components/ReadingContent";
 import type { DraftEditor } from "../state/useDraft";
 import { formatTime } from "./format";
 
@@ -128,15 +130,9 @@ export function BibleEditor({ editor, selectedEntry, isLoading, error, onReload 
         </>
       ) : null}
 
-      <div className="field">
-        <label htmlFor="bible-text">条目内容（纯文本）</label>
-        <textarea
-          id="bible-text"
-          className="textarea"
-          value={editor.draft?.text ?? ""}
-          onChange={(event) => editor.setText(event.target.value)}
-        />
-      </div>
+      {editor.conflict && hasFreshServer ? <details className="conflict-comparison" open><summary>对比本地草稿与已保存版本</summary><div className="comparison-grid"><section><h3>本地草稿（未保存）</h3><ReadingContent text={editor.draft?.text ?? ""} /></section><section><h3>服务端版本 {serverSnapshot.version}</h3><ReadingContent text={serverSnapshot.text} /></section></div></details> : null}
+      <Manuscript key={editingEntry.id} title={editingEntry.title} label="条目内容（纯文本）" dirty={editor.dirty}
+        value={editor.draft?.text ?? ""} onChange={editor.setText} placeholder="写下人物、世界规则或故事时间线，让每一章都有据可循。" />
       <div className="toolbar small muted" style={{ borderTop: "1px solid var(--border)", borderBottom: "none" }}>
         最后更新：{formatTime(editingEntry.updatedAt)}
       </div>
@@ -169,7 +165,7 @@ function bibleSubtitle(
 ): string {
   if (entry.id === savingEntryId) return "保存中…";
   if (entry.id === dirtyEntryId) return "有未保存修改";
-  return `版本 ${entry.version} · ${formatTime(entry.updatedAt)}`;
+  return "";
 }
 
 /**

@@ -4,7 +4,6 @@ import { Banner } from "../components/common";
 import { Icon } from "../components/Icon";
 import { BibleNav } from "./BiblePanel";
 import { ChapterNav } from "./ChapterPanel";
-import { formatTime } from "./format";
 
 /** 书内目录的三大分区。 */
 export type BookSection = "outline" | "chapters" | "bible";
@@ -115,7 +114,7 @@ export function BookNavigation({
                     {outline.isLoading
                       ? "正在读取大纲…"
                       : outline.outline
-                        ? `版本 ${outline.outline.version} · ${formatTime(outline.outline.updatedAt)}`
+                        ? ""
                         : "尚未载入大纲"}
                   </span>
                 </button>

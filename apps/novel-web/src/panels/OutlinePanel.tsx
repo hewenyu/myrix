@@ -2,7 +2,7 @@ import type { Outline } from "@myrix/contracts";
 
 import { Banner, EmptyHint } from "../components/common";
 import { ConflictBanner } from "../components/ConflictBanner";
-import { PlainTextEditor } from "../components/PlainTextEditor";
+import { Manuscript } from "../components/Manuscript";
 import type { DraftEditor } from "../state/useDraft";
 import { formatTime } from "./format";
 
@@ -80,12 +80,9 @@ export function OutlinePanel({ outline, isLoading, loadError, editor, onReload }
         />
       ) : null}
 
-      <PlainTextEditor
-        value={editor.draft.text}
-        onChange={editor.setText}
-        placeholder="在这里写故事大纲。纯文本保存，不使用富文本标记。"
-        ariaLabel="作品大纲"
-      />
+      <Manuscript key={outline.workId} title="故事大纲" label="作品大纲" dirty={editor.dirty}
+        value={editor.draft.text} onChange={editor.setText}
+        placeholder="从一句话的故事开始，再写下人物想要什么、遇到什么阻碍。" />
       <div className="toolbar small muted" style={{ borderTop: "1px solid var(--border)", borderBottom: "none" }}>
         最后更新：{formatTime(outline.updatedAt)}
       </div>

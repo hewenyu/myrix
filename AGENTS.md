@@ -31,7 +31,7 @@ Myrix 是基于 DSH 的受治理 Agent 应用平台，当前交付为 **v0.1 持
 ## 文档与 skills
 
 - 公开说明集中在 [文档索引](<docs/README.md>)，遵循[文档政策](<docs/documentation-policy.md>)；不要添加第二份过时部署 README。
-- 需求分析使用 [myrix-business](<.agents/skills/myrix-business/SKILL.md>)，实现与评审使用 [myrix-development](<.agents/skills/myrix-development/SKILL.md>)；发现规则见 [skills 指南](<docs/development/skills.md>)。
+- 需求分析使用 [myrix-business](<.agents/skills/myrix-business/SKILL.md>)，实现与评审使用 [myrix-development](<.agents/skills/myrix-development/SKILL.md>)，界面设计与评审使用 [myrix-ui-design](<.agents/skills/myrix-ui-design/SKILL.md>) 并遵循[工作台 UI 设计标准](<docs/development/ui-design.md>)；发现规则见 [skills 指南](<docs/development/skills.md>)。
 - 部署 skill 和维护者实例记录只留本地并被 Git/Docker 忽略；不得 `git add -f`。专用公开体验账号之外的任何凭据不进入文档、日志或构建上下文。
 - 当前 Cell 不启用 skill 插件/工具。开发者 skill 的存在不是扩大 Cell 白名单的理由。
 - 管理员不绕过单属主内容授权；未保存章节不得自动发送模型；版本冲突保留草稿。真实模型、线上部署、重启与恢复须明确授权，报告执行和未执行的层级。

@@ -13,8 +13,9 @@
 ## 开发与测试
 
 - [本地开发](<implementation/local-development.md>)：初始化、模型配置、启动及编辑体验。
+- [工作台 UI 设计标准](<development/ui-design.md>)：作者任务、信息分层、文本保真、安全 Markdown、修改目标、令牌/响应式/专注模式与证据分层；§0 是当前实现状态快照。
 - [运行时依赖](<development/runtime-dependencies.md>)：Node/pnpm、子模块与独立 npm CLI 锁定。
-- [项目 skills](<development/skills.md>)：业务/开发技能与仅本地的部署技能。
+- [项目 skills](<development/skills.md>)：业务/开发/界面设计技能与仅本地的部署技能；界面设计 skill 见 [myrix-ui-design](<../.agents/skills/myrix-ui-design/SKILL.md>)。
 - [分层验证指南](<testing/acceptance.md>)：默认门禁、真实 PG/DSH/浏览器/模型/恢复的证据边界。
 - [小说工具 smoke](<testing/novel-smoke.md>)：真实运行时与替身服务的装配检查。
 - [贡献约定](<../AGENTS.md>)：纯函数、默认拒绝、协议与许可要求。
@@ -23,7 +24,7 @@
 
 详见[实现文档目录](<implementation/>)中的 BFF/存储、小说运行时、前端和绑定租约说明；业务装配最终以源码入口为准。
 
-- [小说工作台（novel-web）](<implementation/novel-web.md>)：书架、书内三栏、统一创作 Agent、归档与响应式行为。
+- [小说工作台（novel-web）](<implementation/novel-web.md>)：书架、书内三栏（阅读优先、显式编辑）、统一创作助手与修改目标元数据、归档与响应式行为。
 - [DSH 扩展点](<integration/dsh-seams.md>)：当前 Cell 与历史 shim 的不同边界。
 - [历史 DSH shim](<integration/legacy-dsh-shim.md>)：仅用于 legacy，不是当前主链。
 - [模型网关运维](<implementation/model-gateway-operations.md>)：Responses 上游、凭据、计量与限流。

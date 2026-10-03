@@ -54,7 +54,8 @@ export async function verifyBusinessEditing({ page, context, workId, title, text
   const peer = await login('author', '作者 author');
   try {
     await openBook(peer.page, title);
-    const peerEditor = peer.page.getByLabel('作品大纲').locator('[contenteditable="true"]');
+    await peer.page.getByRole('button', { name: '编辑原文', exact: true }).click();
+    const peerEditor = peer.page.getByLabel('作品大纲', { exact: true }).locator('[contenteditable="true"]');
     await peerEditor.waitFor();
     await peer.page.waitForFunction(expected => document.querySelector('[aria-label="作品大纲"] [contenteditable="true"]')?.textContent === expected, text);
     assert.equal(await peerEditor.innerText(), text);
@@ -122,9 +123,10 @@ export async function verifyBusinessEditing({ page, context, workId, title, text
     assert.equal(entryResponse.status(), 201);
     const entry = await entryResponse.json();
     await bookNavOf(page).getByRole('button').filter({ hasText: marker }).first().click();
-    await page.getByRole('heading', { name: new RegExp(marker) }).waitFor();
+    await page.getByRole('heading', { name: marker, exact: true }).waitFor();
+    await page.getByRole('button', { name: '编辑原文', exact: true }).click();
     const entryText = `修订后的纯文本设定 ${marker}`;
-    await page.getByLabel('条目内容（纯文本）', { exact: true }).fill(entryText);
+    await page.getByLabel('条目内容（纯文本）', { exact: true }).locator('[contenteditable="true"]').fill(entryText);
     const saveEntry = page.waitForResponse(r => r.url() === `${api}/works/${workId}/bible/${entry.id}` && r.request().method() === 'PUT');
     await page.getByRole('button', { name: '保存条目', exact: true }).click();
     assert.equal((await saveEntry).status(), 200);

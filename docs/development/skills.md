@@ -6,7 +6,10 @@ Myrix 将稳定的业务与开发方法作为开发者 Harness skills 分发；�
 | --- | --- | --- |
 | [myrix-business](<../../.agents/skills/myrix-business/SKILL.md>) | 对象、权限、用户流程、需求影响与验收 | Git 跟踪 |
 | [myrix-development](<../../.agents/skills/myrix-development/SKILL.md>) | 模块定位、实现、安全回归、质量门禁和文档同步 | Git 跟踪 |
+| [myrix-ui-design](<../../.agents/skills/myrix-ui-design/SKILL.md>) | 作者优先的 UX、信息分层、文本保真与安全 Markdown、设计令牌、响应式/专注模式、CAS 草稿安全与浏览器证据 | Git 跟踪 |
 | `myrix-deploy` | 维护者目标确认、发布、认证、备份与恢复 | 仅本地；Git/Docker 忽略，不随 clone 分发 |
+
+三个开发者 skill 的 frontmatter 与协议/Cell 边界由 [skills 回归](<../../tests/ci/skills.test.mjs>) 覆盖；UI 规范的权威文档是 [工作台 UI 设计标准](<ui-design.md>)。
 
 ## 发现与格式
 

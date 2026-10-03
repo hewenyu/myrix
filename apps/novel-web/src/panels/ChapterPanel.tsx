@@ -3,9 +3,9 @@ import { useState } from "react";
 
 import { Banner, EmptyHint } from "../components/common";
 import { ConflictBanner } from "../components/ConflictBanner";
-import { ChapterAssistantContext } from "../components/ChapterAssistantContext";
 import { Icon } from "../components/Icon";
-import { PlainTextEditor } from "../components/PlainTextEditor";
+import { Manuscript } from "../components/Manuscript";
+import { ReadingContent } from "../components/ReadingContent";
 import type { DraftEditor } from "../state/useDraft";
 import { formatTime } from "./format";
 
@@ -33,7 +33,7 @@ function chapterSubtitle(
 ): string {
   if (chapter.id === savingChapterId) return "保存中…";
   if (chapter.id === dirtyChapterId) return "有未保存修改";
-  return `版本 ${chapter.version} · ${formatTime(chapter.updatedAt)}`;
+  return "";
 }
 
 /**
@@ -212,20 +212,8 @@ export function ChapterEditor({
         />
       ) : null}
 
-      <details className="versions" key={`${chapter.workId}:${chapter.id}`}>
-        <summary className="small">章节助手上下文（查看与复制）</summary>
-        <ChapterAssistantContext
-          chapter={{ id: chapter.id, workId: chapter.workId, title: chapter.title }}
-          dirty={editor.dirty}
-        />
-      </details>
-
-      <PlainTextEditor
-        value={editor.draft.text}
-        onChange={editor.setText}
-        placeholder="在这里写章节正文。纯文本保存。"
-        ariaLabel={`章节正文：${chapter.title}`}
-      />
+      <Manuscript key={chapter.id} title={chapter.title} label={`章节正文：${chapter.title}`} dirty={editor.dirty}
+        value={editor.draft.text} onChange={editor.setText} placeholder="从一个画面、一句对话开始，把这一章慢慢写出来。" />
 
       <details className="versions">
         <summary className="small">历史版本（{versions.length}）</summary>
@@ -239,7 +227,8 @@ export function ChapterEditor({
                 <summary className="small">
                   版本 {version.version} · {formatTime(version.createdAt)}
                 </summary>
-                <pre className="code">{version.text}</pre>
+                <ReadingContent className="version-reading" text={version.text} />
+                <details className="source-details"><summary>查看原文</summary><pre className="code">{version.text}</pre></details>
               </details>
             </li>
           ))}
