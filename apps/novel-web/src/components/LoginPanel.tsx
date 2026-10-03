@@ -31,18 +31,16 @@ export function LoginPanel({
 
   return (
     <section className="login" aria-label="登录">
-      <h1 style={{ fontSize: 18 }}>Myrix 小说工作台</h1>
-      <p className="muted small">使用企业身份登录后管理作品、大纲、章节、设定，并与创作助手协作。</p>
+      <p className="eyebrow">MYRIX · 写作空间</p>
+      <h1>让故事，慢慢生长。</h1>
+      <p className="muted small">从一个想法，到一整本书。登录你的书架，与创作 Agent 一起写下下一页。</p>
 
       {loading ? <p className="muted small">正在读取认证配置…</p> : null}
       {error ? <Banner level="error">{error}</Banner> : null}
 
       {!loading && config ? (
         <>
-          <Banner level={isDevelopment ? "warn" : "info"}>
-            认证模式：{isDevelopment ? "开发模式（仅限本机 loopback，服务端显式开启）" : "OIDC 单点登录"}
-            。界面不会发送任何自签身份标识。
-          </Banner>
+          {isDevelopment ? <Banner level="warn">开发模式：仅限本机测试，身份由服务端签发。</Banner> : null}
 
           {isDevelopment ? (
             <div className="stack" style={{ marginTop: 12 }}>
@@ -63,7 +61,7 @@ export function LoginPanel({
           ) : (
             <div className="stack" style={{ marginTop: 12 }}>
               <button type="button" className="primary" onClick={loginWithOidc}>
-                使用企业账号登录（OIDC）
+                登录我的书架
               </button>
             </div>
           )}

@@ -5,12 +5,13 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * 工作台**选择归属**的真实组件测试。
+ * 工作台**选择归属**的端到端组件测试：登录 → 书架 → 开书（首章自动选中）→
+ * 返回书架 → 切换作品，以及"代际晚到的回包绝不抢走/清空用户的新选择"。
  *
  * 只替换网络 / EventSource / 认证边界（`endpoints`、`http.openEventSource`、`useAuth`）
- * 与 Tiptap 编辑器（jsdom 里没有排版引擎，且这里断言的是选择状态而非排版）。
- * App 的 `Selection` 归约、新建/切换/撤销回包的代际判定、按 workId 的组件 key
- * 全部是真实实现——绝不用替身替换这些关键逻辑。
+ * 与 Tiptap 编辑器（jsdom 没有排版引擎，这里断言的是选择状态而不是排版）。
+ * App 的 Selection 归约、按 workId 的组件 key、WorkspacePane 的首开建议、
+ * AssistantPanel 的首条消息等待全部是真实实现——绝不用替身替换这些关键逻辑。
  */
 
 const mocks = vi.hoisted(() => ({
@@ -30,14 +31,15 @@ const mocks = vi.hoisted(() => ({
   sessionsList: vi.fn(),
   sessionsCreate: vi.fn(),
   sessionsRemove: vi.fn(),
+  sessionsArchive: vi.fn(),
   sessionsSend: vi.fn(),
   sessionsCancel: vi.fn(),
   openEventSource: vi.fn(),
 }));
 
-// 认证是外部边界：这里只声明“已登录”，工作台内部逻辑保持真实。
-vi.mock("../src/state/useAuth", () => ({
-  useAuth: () => ({
+/** 认证是外部边界：这里可以显式在“未登录/已登录”之间切换，工作台内部逻辑保持真实。 */
+const authMock = vi.hoisted(() => ({
+  state: {
     config: { mode: "development", loginUrl: "/auth/login" },
     session: {
       identity: { tenantId: "t1", userId: "u1", displayName: "作者", role: "member" },
@@ -46,15 +48,17 @@ vi.mock("../src/state/useAuth", () => ({
     },
     isLoading: false,
     isAuthenticated: true,
-    sessionError: null,
+    sessionError: null as string | null,
     loginWithOidc: vi.fn(),
     devLogin: vi.fn(),
     devLoginPending: false,
-    devLoginError: null,
+    devLoginError: null as string | null,
     logout: vi.fn(),
     logoutPending: false,
-  }),
+  },
 }));
+
+vi.mock("../src/state/useAuth", () => ({ useAuth: () => authMock.state }));
 
 // Tiptap 的 DOM 机制不是本测试的对象；选择逻辑仍在真实的 OutlinePanel/ChapterPanel 之上。
 vi.mock("../src/components/PlainTextEditor", () => ({
@@ -93,6 +97,7 @@ vi.mock("../src/api/endpoints", async (importOriginal) => {
       list: mocks.sessionsList,
       create: mocks.sessionsCreate,
       remove: mocks.sessionsRemove,
+      archive: mocks.sessionsArchive,
       send: mocks.sessionsSend,
       cancel: mocks.sessionsCancel,
     },
@@ -106,7 +111,7 @@ vi.mock("../src/api/http", async (importOriginal) => {
 
 import { App } from "../src/App";
 
-/** 受控 EventSource 替身：测试自己决定何时 open/message/error（这里只需要形状）。 */
+/** 受控 EventSource 替身：测试自己决定何时 open/message/error。 */
 class FakeEventSource {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -148,21 +153,14 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
 }
 
 const ISO = "2026-01-01T00:00:00.000Z";
+const ISO2 = "2026-02-02T00:00:00.000Z";
 
 function work(id: string, title: string): Work {
-  return {
-    id,
-    tenantId: "t1",
-    ownerUserId: "u1",
-    title,
-    description: "",
-    createdAt: ISO,
-    updatedAt: ISO,
-  };
+  return { id, tenantId: "t1", ownerUserId: "u1", title, description: "", createdAt: ISO, updatedAt: ISO };
 }
 
-function session(id: string, workId: string, preset: NovelSession["preset"]): NovelSession {
-  return { id, workId, preset, status: "active", createdAt: ISO };
+function session(id: string, workId: string, overrides: Partial<NovelSession> = {}): NovelSession {
+  return { id, workId, preset: "novel-assistant", status: "active", createdAt: ISO, ...overrides };
 }
 
 function chapter(id: string, workId: string, title: string): Chapter {
@@ -171,40 +169,84 @@ function chapter(id: string, workId: string, title: string): Chapter {
 
 const W1 = work("w1", "作品一");
 const W2 = work("w2", "作品二");
-const S1 = session("s1", "w1", "novel-chapter");
-const S2 = session("s2", "w1", "novel-outline");
+const W3 = work("w3", "新书");
+const C1 = chapter("c1", "w1", "第一章");
+const C2 = chapter("c2", "w2", "乙章");
+const S1 = session("s1", "w1");
+const S2 = session("s2", "w1");
 
 let workItems: Work[];
 let sessionItems: Record<string, NovelSession[]>;
+let chapterItems: Record<string, Chapter[]>;
+let chapterById: Record<string, Chapter>;
 
-function renderApp(): void {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: 0 }, mutations: { retry: false } },
-  });
-  render(
+function appTree(client: QueryClient) {
+  return (
     <QueryClientProvider client={client}>
       <App />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
 }
 
-function assistantRegion(): HTMLElement {
+function renderApp() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 0 }, mutations: { retry: false } },
+  });
+  return { client, ...render(appTree(client)) };
+}
+
+function assistant(): HTMLElement {
   return screen.getByRole("region", { name: "创作助手" });
 }
 
-/** 会话列表里的条目：带 preset 标题与“活跃”状态，区别于 preset 选项与新建按钮。 */
-function sessionButton(presetTitle: string): HTMLElement {
-  return within(assistantRegion()).getByRole("button", {
-    name: new RegExp(`${presetTitle}[\\s\\S]*活跃`),
-  });
+/** 历史列表里的会话条目（统一 Agent 显示为“创作 Agent · 序号”）。 */
+function historyItem(index: number): HTMLElement {
+  return within(assistant()).getByRole("button", { name: new RegExp(`创作 Agent · ${index}`) });
+}
+
+/** 会话列表是异步读取的：点条目之前先等它出现。 */
+function findHistoryItem(index: number): Promise<HTMLElement> {
+  return within(assistant()).findByRole("button", { name: new RegExp(`创作 Agent · ${index}`) });
+}
+
+async function expectShelf(): Promise<void> {
+  await waitFor(() => expect(screen.getByRole("heading", { name: /我的书架/ })).toBeDefined());
+  expect(screen.queryByRole("region", { name: "作品内容" })).toBeNull();
+}
+
+async function openBook(user: ReturnType<typeof userEvent.setup>, title: string): Promise<void> {
+  await user.click(await screen.findByLabelText(`打开书本：${title}`));
+  await waitFor(() => expect(screen.getByRole("region", { name: "作品内容" })).toBeDefined());
+}
+
+async function backToShelf(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  await user.click(screen.getByRole("button", { name: "书架" }));
+  await expectShelf();
+}
+
+async function openHistory(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  if (within(assistant()).queryByText("对话记录")) return;
+  await user.click(screen.getByRole("button", { name: "历史对话" }));
+  expect(within(assistant()).getByText("对话记录")).toBeDefined();
+}
+
+/** 选中会话的可靠标志：只有选中了会话才出现“当前对话操作”。 */
+async function expectSessionSelected(): Promise<void> {
+  await waitFor(() => expect(screen.getByLabelText("当前对话操作")).toBeDefined());
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   FakeEventSource.instances = [];
+  authMock.state.isAuthenticated = true;
+  authMock.state.sessionError = null;
+  // 默认确认所有“离开会丢草稿”的询问；需要拒绝的用例再局部覆盖。
+  vi.stubGlobal("confirm", vi.fn(() => true));
 
   workItems = [W1, W2];
-  sessionItems = { w1: [S1, S2] };
+  sessionItems = { w1: [S1, S2], w2: [] };
+  chapterItems = { w1: [C1], w2: [C2] };
+  chapterById = { c1: C1, c2: C2 };
 
   mocks.worksList.mockImplementation(async () => ({ items: workItems }));
   mocks.worksCreate.mockImplementation(async (input: { title: string }) => work("w-new", input.title));
@@ -218,12 +260,14 @@ beforeEach(() => {
   }));
   mocks.outlineSave.mockResolvedValue({ status: "saved", version: 2 });
 
-  mocks.chaptersList.mockImplementation(async () => ({ items: [] }));
-  mocks.chaptersCreate.mockImplementation(async (workId: string, input: { title: string }) =>
-    chapter("c-new", workId, input.title),
-  );
+  mocks.chaptersList.mockImplementation(async (workId: string) => ({ items: chapterItems[workId] ?? [] }));
+  mocks.chaptersCreate.mockImplementation(async (workId: string, input: { title: string }) => {
+    const created = chapter(`c-new-${input.title}`, workId, input.title);
+    chapterById[created.id] = created;
+    return created;
+  });
   mocks.chaptersGet.mockImplementation(async (workId: string, chapterId: string) =>
-    chapter(chapterId, workId, "迟到的章节"),
+    chapterById[chapterId] ?? chapter(chapterId, workId, "章节"),
   );
   mocks.chaptersVersions.mockResolvedValue({ items: [] });
   mocks.chaptersSave.mockResolvedValue({ status: "saved", version: 2 });
@@ -240,161 +284,275 @@ beforeEach(() => {
   });
   mocks.bibleSave.mockResolvedValue({ status: "saved", version: 2 });
 
-  mocks.sessionsList.mockImplementation(async (workId: string) => ({
-    items: sessionItems[workId] ?? [],
-  }));
-  mocks.sessionsCreate.mockImplementation(async (workId: string, preset: NovelSession["preset"]) =>
-    session("s-new", workId, preset),
-  );
+  mocks.sessionsList.mockImplementation(async (workId: string) => ({ items: sessionItems[workId] ?? [] }));
+  mocks.sessionsCreate.mockImplementation(async (workId: string) => session("s-new", workId));
   mocks.sessionsRemove.mockResolvedValue(null);
-  mocks.sessionsSend.mockResolvedValue({ commandId: "c-1", status: "queued" });
-  mocks.sessionsCancel.mockResolvedValue({ commandId: "c-1", status: "queued" });
+  mocks.sessionsArchive.mockImplementation(async (sessionId: string, archived: boolean) => {
+    const found = Object.values(sessionItems).flat().find((item) => item.id === sessionId);
+    return { ...(found ?? session(sessionId, "w1")), archivedAt: archived ? ISO2 : null };
+  });
+  mocks.sessionsSend.mockResolvedValue({ commandId: "cmd-1", status: "queued" });
+  mocks.sessionsCancel.mockResolvedValue({ commandId: "cmd-1", status: "queued" });
 
   mocks.openEventSource.mockImplementation((path: string) => new FakeEventSource(path) as unknown as EventSource);
   vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
 });
 
-describe("App 选择归属", () => {
-  it("新建作品成功会清空旧作品的会话，不把旧 session 留在新作品界面", async () => {
-    workItems = [W1]; // 新作品尚不存在
+describe("App 登录 → 书架 → 开书 → 返回书架 → 切书", () => {
+  it("未登录显示登录入口；登录后落到书架而不是直接进书", async () => {
+    authMock.state.isAuthenticated = false;
+    const view = renderApp();
+    expect(screen.getByRole("region", { name: "登录" })).toBeDefined();
+    expect(screen.queryByRole("heading", { name: /我的书架/ })).toBeNull();
+
+    authMock.state.isAuthenticated = true;
+    view.rerender(appTree(view.client));
+
+    await expectShelf();
+    expect(await screen.findByLabelText("打开书本：作品一")).toBeDefined();
+    expect(screen.getByLabelText("打开书本：作品二")).toBeDefined();
+  });
+
+  it("开书自动选中第一章；返回书架再开另一本，切换为那本书自己的内容", async () => {
     const user = userEvent.setup();
     renderApp();
+    await expectShelf();
 
-    await user.click(await screen.findByRole("button", { name: /作品一/ }));
-    await user.click(await screen.findByRole("button", { name: /章节写作[\s\S]*活跃/ }));
-    expect(sessionButton("章节写作")).toHaveAttribute("aria-current", "true");
+    // 开第一本：有章节 → 首开建议选中第一项，中栏直接显示正文。
+    await openBook(user, "作品一");
+    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    expect(screen.getByRole("button", { name: "章节" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(screen.getByRole("navigation", { name: "书内目录" })).getByRole("button", { name: /第一章/ })).toHaveAttribute("aria-current", "true");
 
-    const created = W2;
-    const gate = deferred<Work>();
-    mocks.worksCreate.mockReturnValueOnce(gate.promise);
+    // 目录新建按需展开：已有章节时先收起，点“新建章节”才展开表单，收起后回到折叠态。
+    expect(screen.queryByLabelText("新章节标题")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "新建章节" }));
+    expect(screen.getByLabelText("新章节标题")).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "收起" }));
+    expect(screen.queryByLabelText("新章节标题")).toBeNull();
 
-    await user.type(screen.getByLabelText("标题"), "作品二");
-    await user.click(screen.getByRole("button", { name: "创建作品" }));
+    // 选一条会话，验证返回书架后不会留在别的书里。
+    await openHistory(user);
+    await user.click(await findHistoryItem(1));
+    await expectSessionSelected();
 
-    await act(async () => {
-      workItems = [...workItems, created];
-      gate.resolve(created);
-    });
+    await backToShelf(user);
 
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /作品二/ })).toHaveAttribute("aria-current", "true"),
-    );
-    // 关键回归：新作品里没有任何选中的会话，输入框回到“先选择或新建会话”，
-    // 而不是沿用旧作品的 s1 继续发送模型命令。
-    expect(screen.getByPlaceholderText("先选择或新建会话")).toBeDefined();
+    // 开第二本：显示的是它自己的章，不是上一本的。
+    await openBook(user, "作品二");
+    expect(await screen.findByLabelText("章节正文：乙章")).toBeDefined();
+    expect(screen.queryByLabelText("章节正文：第一章")).toBeNull();
+
+    // 会话选择按作品隔离：作品二还没有任何会话。
+    await openHistory(user);
+    await waitFor(() => expect(within(assistant()).getByText("还没有对话，从下面的一句话开始。")).toBeDefined());
     expect(mocks.sessionsSend).not.toHaveBeenCalled();
   });
 
-  it("创建会话期间切到另一个作品：迟到的 create 回包不会自动选中", async () => {
+  it("没有章节的书留在大纲，不伪造选中", async () => {
+    const user = userEvent.setup();
+    chapterItems = { w1: [C1], w2: [] };
+    renderApp();
+    await expectShelf();
+
+    await openBook(user, "作品二");
+    await waitFor(() => expect(screen.getByLabelText("作品大纲")).toBeDefined());
+    expect(screen.getByRole("button", { name: "大纲" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "章节" })).toHaveAttribute("aria-pressed", "false");
+  });
+});
+
+describe("App 代际归属：迟到的异步回包不抢用户的新选择", () => {
+  it("创建作品期间开了别的书：迟到的创建回包不切走当前书，但新书仍进入书架", async () => {
     const user = userEvent.setup();
     renderApp();
+    await expectShelf();
 
-    await user.click(await screen.findByRole("button", { name: /作品一/ }));
+    const gate = deferred<Work>();
+    mocks.worksCreate.mockReturnValueOnce(gate.promise);
+
+    await user.click(screen.getByRole("button", { name: /新建书本/ }));
+    await user.type(screen.getByLabelText("书名"), "新书");
+    await user.click(screen.getByRole("button", { name: "创建并开始写作" }));
+
+    // 创建在途时用户先开了作品一。
+    await openBook(user, "作品一");
+    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+
+    workItems = [...workItems, W3];
+    await act(async () => {
+      gate.resolve(W3);
+    });
+
+    // 迟到的回包属于上一条选择：不抢走当前的书。
+    expect(screen.getByLabelText("章节正文：第一章")).toBeDefined();
+    expect(screen.queryByRole("heading", { name: /我的书架/ })).toBeNull();
+
+    // 但它仍然落进书架列表（结果不被丢弃，只是不抢选择）。
+    await backToShelf(user);
+    expect(screen.getByLabelText("打开书本：新书")).toBeDefined();
+  });
+
+  it("新建会话（首条消息）期间切书：迟到的会话不选中，也不把首条消息发出去", async () => {
+    const user = userEvent.setup();
+    sessionItems = { w1: [], w2: [] };
+    renderApp();
+    await expectShelf();
+
     const gate = deferred<NovelSession>();
     mocks.sessionsCreate.mockReturnValueOnce(gate.promise);
 
-    await user.click(screen.getByRole("button", { name: /新建会话/ }));
-    await user.click(screen.getByRole("button", { name: /作品二/ }));
+    await openBook(user, "作品二");
+    expect(await screen.findByLabelText("章节正文：乙章")).toBeDefined();
+    await user.type(screen.getByLabelText("消息输入"), "写个开头");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(mocks.sessionsCreate).toHaveBeenCalledWith("w2", "novel-assistant"));
+
+    // 创建在途时切回作品一。
+    await backToShelf(user);
+    await openBook(user, "作品一");
+    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
 
     await act(async () => {
-      gate.resolve(session("s-late", "w1", "novel-chapter"));
+      gate.resolve(session("s-late", "w2"));
     });
 
-    expect(screen.getByPlaceholderText("先选择或新建会话")).toBeDefined();
+    await waitFor(() => expect(mocks.sessionsSend).not.toHaveBeenCalled());
+    await openHistory(user);
+    await waitFor(() => expect(within(assistant()).getByText("还没有对话，从下面的一句话开始。")).toBeDefined());
   });
 
-  it("A→B→A：创建会话的旧回包不得偷选回到 A 后的选择", async () => {
+  it("A→B→A：新建会话的旧回包不得偷选回到 A 之后的选择", async () => {
     const user = userEvent.setup();
+    sessionItems = { w1: [], w2: [] };
     renderApp();
+    await expectShelf();
 
-    await user.click(await screen.findByRole("button", { name: /作品一/ }));
     const gate = deferred<NovelSession>();
     mocks.sessionsCreate.mockReturnValueOnce(gate.promise);
 
-    await user.click(screen.getByRole("button", { name: /新建会话/ }));
-    await user.click(screen.getByRole("button", { name: /作品二/ }));
-    await user.click(screen.getByRole("button", { name: /作品一/ }));
+    await openBook(user, "作品一");
+    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+    await user.type(screen.getByLabelText("消息输入"), "第一条");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(mocks.sessionsCreate).toHaveBeenCalledWith("w1", "novel-assistant"));
+
+    await backToShelf(user);
+    await openBook(user, "作品二");
+    expect(await screen.findByLabelText("章节正文：乙章")).toBeDefined();
+    await backToShelf(user);
+    await openBook(user, "作品一");
+    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
 
     await act(async () => {
-      gate.resolve(session("s-late", "w1", "novel-chapter"));
+      gate.resolve(session("s-late", "w1"));
     });
 
-    // 当前 work 虽然又等于发起时的 w1，但代际已经被两次显式选择推进：
-    // 旧回包属于上一条选择，必须丢弃。
-    expect(screen.getByPlaceholderText("先选择或新建会话")).toBeDefined();
+    // workId 虽然又等于发起时的 w1，但代际已被两次显式选择推进：旧回包必须丢弃。
+    expect(mocks.sessionsSend).not.toHaveBeenCalled();
+    await openHistory(user);
+    await waitFor(() => expect(within(assistant()).getByText("还没有对话，从下面的一句话开始。")).toBeDefined());
   });
 
-  it("旧会话撤销回包不能清空后来选中的会话", async () => {
+  it("归档会话期间用户改选另一条：迟到的归档不清空新选择，归档结果仍然生效", async () => {
     const user = userEvent.setup();
     renderApp();
+    await expectShelf();
 
-    await user.click(await screen.findByRole("button", { name: /作品一/ }));
-    await user.click(await screen.findByRole("button", { name: /章节写作[\s\S]*活跃/ }));
+    await openBook(user, "作品一");
+    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+
+    await openHistory(user);
+    await user.click(await findHistoryItem(1));
+    await expectSessionSelected();
+
+    const gate = deferred<NovelSession>();
+    mocks.sessionsArchive.mockReturnValueOnce(gate.promise);
+    await user.click(screen.getByLabelText("当前对话操作"));
+    await user.click(screen.getByRole("button", { name: "归档对话" }));
+    await waitFor(() => expect(mocks.sessionsArchive).toHaveBeenCalledWith("s1", true));
+
+    // 归档在途时用户改选第二条会话。
+    await openHistory(user);
+    await user.click(await findHistoryItem(2));
+    await expectSessionSelected();
+
+    sessionItems = { ...sessionItems, w1: [{ ...S1, archivedAt: ISO2 }, S2] };
+    await act(async () => {
+      gate.resolve({ ...S1, archivedAt: ISO2 });
+    });
+
+    // 迟到回包归档的是 s1；当前选择是 s2，不得被清空（最近里只剩 s2，即第 1 项）。
+    await openHistory(user);
+    await waitFor(() => expect(historyItem(1)).toHaveAttribute("aria-current", "true"));
+    expect(within(assistant()).queryByRole("button", { name: /创作 Agent · 2/ })).toBeNull();
+
+    // 归档本身仍然落定：切到“已归档”能看到 s1，并且可恢复。
+    await user.click(screen.getByRole("button", { name: "已归档" }));
+    const archivedItem = within(assistant()).getByRole("button", { name: /创作 Agent · 1/ });
+    expect(archivedItem).toBeDefined();
+    expect(within(assistant()).getByLabelText("恢复对话")).toBeDefined();
+  });
+
+  it("永久结束会话期间用户改选另一条：迟到的删除不清空新选择", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await expectShelf();
+
+    await openBook(user, "作品一");
+    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
+
+    await openHistory(user);
+    await user.click(await findHistoryItem(1));
+    await expectSessionSelected();
 
     const gate = deferred<null>();
     mocks.sessionsRemove.mockReturnValueOnce(gate.promise);
-    await user.click(screen.getByRole("button", { name: "撤销会话" }));
+    await user.click(screen.getByLabelText("当前对话操作"));
+    await user.click(screen.getByRole("button", { name: "永久结束对话" }));
+    await waitFor(() => expect(mocks.sessionsRemove).toHaveBeenCalledWith("s1"));
 
-    await user.click(sessionButton("大纲助手"));
-    expect(sessionButton("大纲助手")).toHaveAttribute("aria-current", "true");
+    await openHistory(user);
+    await user.click(await findHistoryItem(2));
+    await expectSessionSelected();
 
     await act(async () => {
       gate.resolve(null);
     });
 
-    // 撤销的是 s1；用户后来选了 s2，迟到的回包不得把 s2 的选择清掉。
-    expect(sessionButton("大纲助手")).toHaveAttribute("aria-current", "true");
-    expect(sessionButton("章节写作")).toHaveAttribute("aria-current", "false");
-  });
-
-  it("旧删除作品回包不能清空用户后来选中的作品", async () => {
-    const user = userEvent.setup();
-    renderApp();
-
-    await user.click(await screen.findByRole("button", { name: /作品一/ }));
-
-    const gate = deferred<null>();
-    mocks.worksRemove.mockReturnValueOnce(gate.promise);
-    await user.click(screen.getByRole("button", { name: "删除当前作品" }));
-    await user.click(screen.getByRole("button", { name: "确认删除" }));
-
-    await user.click(screen.getByRole("button", { name: /作品二/ }));
-    expect(screen.getByRole("button", { name: /作品二/ })).toHaveAttribute("aria-current", "true");
-
-    await act(async () => {
-      workItems = workItems.filter((item) => item.id !== W1.id);
-      gate.resolve(null);
-    });
-
-    // 删除的是 w1；用户已经选了 w2，迟到的回包不得把 w2 清成 null。
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: /作品二/ })).toHaveAttribute("aria-current", "true"),
-    );
+    await openHistory(user);
+    await waitFor(() => expect(historyItem(2)).toHaveAttribute("aria-current", "true"));
+    expect(historyItem(1)).toHaveAttribute("aria-current", "false");
   });
 
   it("中栏按 work 隔离：新建章节的迟到回包不会在新作品里选中章节", async () => {
     const user = userEvent.setup();
+    chapterItems = { w1: [C1], w2: [] };
     renderApp();
-
-    await user.click(await screen.findByRole("button", { name: /作品一/ }));
-    await user.click(screen.getByRole("tab", { name: "章节" }));
+    await expectShelf();
 
     const gate = deferred<Chapter>();
     mocks.chaptersCreate.mockReturnValueOnce(gate.promise);
-    await user.type(screen.getByLabelText("新章节标题"), "迟到章节");
-    await user.click(screen.getByRole("button", { name: "新建章节" }));
 
-    // 切到另一个作品：WorkspacePane 以 workId 为 key 重建，本地章节选择属于 w1 实例。
-    await user.click(screen.getByRole("button", { name: /作品二/ }));
-    await user.click(screen.getByRole("tab", { name: "章节" }));
+    await openBook(user, "作品二");
+    expect(await screen.findByLabelText("作品大纲")).toBeDefined();
+    // 一章都没有：新建表单按需直接展开。
+    await user.type(screen.getByLabelText("新章节标题"), "迟到的章节");
+    await user.click(screen.getByRole("button", { name: "新建章节" }));
+    expect(mocks.chaptersCreate).toHaveBeenCalledWith("w2", { title: "迟到的章节" });
+
+    // 创建在途时切到作品一：WorkspacePane 按 workId 重建，本地章节选择属于 w2 实例。
+    await backToShelf(user);
+    await openBook(user, "作品一");
+    expect(await screen.findByLabelText("章节正文：第一章")).toBeDefined();
 
     await act(async () => {
-      gate.resolve(chapter("c-late", "w1", "迟到的章节"));
+      gate.resolve(chapter("c-late", "w2", "迟到的章节"));
     });
 
-    // w2 的中栏没有选中任何章节：既不会显示 w1 的迟到章节，也不会去读取它。
-    expect(screen.getByText("请选择或新建一个章节。")).toBeDefined();
+    // 作品一仍旧显示自己的第一章：迟到的 w2 章节既不被选中，也不会被读取。
+    expect(screen.getByLabelText("章节正文：第一章")).toBeDefined();
     expect(screen.queryByText(/迟到的章节/)).toBeNull();
-    expect(mocks.chaptersGet).not.toHaveBeenCalled();
+    expect(mocks.chaptersGet.mock.calls.some(([, chapterId]) => chapterId === "c-late")).toBe(false);
   });
 });

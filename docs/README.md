@@ -4,7 +4,7 @@
 
 ## 产品与架构
 
-- [业务说明](<business.md>)：对象、权限、三个助手、冲突与验收条件。
+- [业务说明](<business.md>)：对象、权限、统一创作助手与历史 preset、归档语义、冲突与验收条件。
 - [总体架构](<architecture.md>)：当前调用链、模块职责、安全边界与 legacy 区分。
 - [路线图](<roadmap.md>)：已实现、待现场验证和后续里程碑。
 - [本轮项目复盘](<reviews/project-review-2026-10.md>)：代码与文档差异、风险、优先级和本轮验证。
@@ -23,10 +23,11 @@
 
 详见[实现文档目录](<implementation/>)中的 BFF/存储、小说运行时、前端和绑定租约说明；业务装配最终以源码入口为准。
 
+- [小说工作台（novel-web）](<implementation/novel-web.md>)：书架、书内三栏、统一创作 Agent、归档与响应式行为。
 - [DSH 扩展点](<integration/dsh-seams.md>)：当前 Cell 与历史 shim 的不同边界。
 - [历史 DSH shim](<integration/legacy-dsh-shim.md>)：仅用于 legacy，不是当前主链。
 - [模型网关运维](<implementation/model-gateway-operations.md>)：Responses 上游、凭据、计量与限流。
-- [ADR 目录](<adr/>)：按时间保留决策，旧设计不自动等于当前运行态；优先阅读被当前实现引用的 ADR。
+- [ADR 目录](<adr/>)：按时间保留决策，旧设计不自动等于当前运行态；优先阅读被当前实现引用的 ADR。与本主线直接相关的是 0013（认证）、0017（工具边界）、0019（绑定租约）、0020（生产装配）、0023（Responses 网关）、0025（部署策略）、0026（写输出投影）、0028（会话恢复）、0029（单机运行时）与 [0034（统一创作助手与会话归档）](<adr/0034-novel-assistant-and-session-archive.md>)。
 
 ## 自行部署
 

@@ -16,7 +16,7 @@ import { reportReachable, reportUnreachable } from "./transport";
 export const API_BASE = (import.meta.env.VITE_BFF_BASE ?? "/api/v1").replace(/\/$/, "");
 
 export interface RequestOptions {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   signal?: AbortSignal;
   /** 认证解析接口自身不触发 401 全局处理，避免死循环。 */

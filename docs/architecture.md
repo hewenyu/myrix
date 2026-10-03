@@ -75,7 +75,7 @@ settings 等通用能力；见 [cell.patch.yml](<../bundles/myrix-base/cell.patc
 | `@myrix/binding-lease` | 主体活性租约 + 六工具策略快照的唯一生产者 |
 | `@myrix/runtime-driver` | `POST /v1/commands`、SSE、撤权、drain、`GET /v1/ready` |
 | `@myrix/llm-gateway` | 模型路由：每次调用都经企业网关并携带会话归因 |
-| `@myrix/novel` | 小说纵向能力：`ctx.novelStore` 与三个 preset（工具在 preset 作用域内注册） |
+| `@myrix/novel` | 小说纵向能力：`ctx.novelStore` 与四个 preset（统一创作助手 + 三个历史受限 preset，工具在 preset 作用域内注册） |
 
 ## 3. 关键流程
 
@@ -109,6 +109,7 @@ sequenceDiagram
 - 命令落到 `commands` 表，带 `op`、`body_hash`、状态机与租约；见 [`commands.ts`](<../packages/platform-store/src/repositories/commands.ts#L90-L308>)。
 - 投递前用 `/v1/ready` 的 bootId 与命令回执做恢复判定；见 [ADR 0028](<adr/0028-runtime-session-recovery.md>)。
 - SSE 只做白名单投影，未知名不投影；订阅期间持续复核授权；见 [`runtime-router.ts`](<../apps/bff/src/runtime-router.ts#L1425-L1486>)。
+- 会话归档/恢复是 `PATCH /sessions/:id { archived }` 的**元数据写**（[`setArchived`](<../packages/platform-store/src/repositories/bindings.ts#L365-L470>)）：不入 `commands`、不投递、不通知 Cell、不动 `status`/`rev`。归档期间只有新的 `send` 被拒（409 `session_archived`）；`cancel`、事件流与已入队命令照常，见 [ADR 0034](<adr/0034-novel-assistant-and-session-archive.md>)。
 
 ### 3.3 工具调用与作品写入（Cell → works → PostgreSQL）
 
@@ -160,7 +161,7 @@ sequenceDiagram
 | `chapters` / `chapter_versions` | 章节与版本 | 版本表只追加；写入走 CAS（`expectedVersion`） |
 | `outline_documents` / `outline_versions` | 大纲与版本 | 同上，大纲对外是纯文本 wire |
 | `bible_entries` / `bible_entry_versions` | 设定与版本 | 同上，条目必须属于同一作品 |
-| `session_bindings` | 会话绑定 | `status + revoked_revision` 同时参与判定；撤权即 `rev+1` |
+| `session_bindings` | 会话绑定 | `status + revoked_revision` 同时参与判定；撤权即 `rev+1`；`archived_at` 是正交的展示元数据（归档不撤权、不停止任务，只拒新的 `send`） |
 | `commands` | 会话命令 | `(tenant_id, id)` 唯一；`body_hash` 校验；状态机 + 租约 + 退避 |
 | `outbox_messages` | 跨进程通知 | 与业务同事务写入，至少一次投递 |
 | `audit_events` | 治理与数据审计 | 追加写；带 effect / reason / matched_rules / trace_id |
@@ -224,6 +225,7 @@ IDP 同机运行，宿主上既有的反向代理终结 TLS 并放通 OIDC 路�
 | 策略快照缺失（`requirePolicy`） | 所有工具调用拒绝 | 不把缺策略解释成放行 |
 | 命令投递超时/崩溃 | 释放命令并指数退避重试，不丢行；超过上限进 `dead` | 可恢复且不重复结算 |
 | 会话撤权 | `rev+1` + outbox 通知 Cell + 销毁 Agent | 撤权后发送返回 410 |
+| 会话归档（`PATCH /sessions/:id`） | 只写 `archived_at`；新的 `send` 409 `session_archived`，`cancel`/事件流/工具/已入队命令不受影响 | 归档是展示元数据，不是撤权；不得静默丢弃已发出的意图 |
 | 版本冲突（CAS） | HTTP 409，保留本地草稿，必须重新读取 | 不允许静默覆盖 |
 | 模型网关缺上游密钥 | 服务可存活，模型请求明确 503（预占之前） | 不模拟模型、不扣额度 |
 | 请求超限（BFF 120 次/分钟/IP） | 429 | 保留限流，不为测试放宽 |
@@ -285,5 +287,5 @@ DSH 通过只读 submodule 引入并锁定提交，所有定制以 Cordis 插件
 | 模型网关 | [implementation/model-gateway.md](<implementation/model-gateway.md>) |
 | 平台存储 | [implementation/platform-store.md](<implementation/platform-store.md>) |
 | 历史 Cell 管理器（K8s） | [implementation/cell-manager.md](<implementation/cell-manager.md>) |
-| 决策记录 | [adr/](<adr/>)（0013、0017、0019、0020、0023、0025、0026、0029 与本主线直接相关） |
+| 决策记录 | [adr/](<adr/>)（0013、0017、0019、0020、0023、0025、0026、0028、0029、0034 与本主线直接相关） |
 | 代码与文档复盘 | [reviews/project-review-2026-10.md](<reviews/project-review-2026-10.md>) |

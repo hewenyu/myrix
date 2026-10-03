@@ -16,7 +16,7 @@ export interface OutlinePanelProps {
 }
 
 /** 大纲编辑：纯文本 + 显式 expectedVersion 保存，冲突时保留本地草稿。 */
-export function OutlinePanel({ workId, outline, isLoading, loadError, editor, onReload }: OutlinePanelProps) {
+export function OutlinePanel({ outline, isLoading, loadError, editor, onReload }: OutlinePanelProps) {
   if (isLoading) return <EmptyHint>正在读取大纲…</EmptyHint>;
   if (loadError) {
     return (
@@ -31,7 +31,7 @@ export function OutlinePanel({ workId, outline, isLoading, loadError, editor, on
     <div className="editor">
       <div className="toolbar">
         <span className="small muted">
-          作品 {workId} · 已保存版本 {editor.draft.base?.version ?? 0}
+          故事大纲 · 已保存版本 {editor.draft.base?.version ?? 0}
           {editor.dirty ? " · 有未保存修改" : " · 无未保存修改"}
         </span>
         <span className="spacer" />

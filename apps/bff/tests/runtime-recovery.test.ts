@@ -39,6 +39,7 @@ import pg from "pg";
 import { createGrantSigner, createGrantVerifier, generateTestKeyPair, sha256Hex } from "@myrix/grant";
 import type { PlatformIdentity, SessionStreamEvent } from "@myrix/contracts";
 import { PlatformStore } from "../../../packages/platform-store/src/store";
+import { SessionsRepository } from "../../../packages/platform-store/src/repositories/bindings";
 import { createGovernanceAuthorizer } from "../../../packages/platform-store/src/authz";
 import { authorizePlatform } from "@myrix/governance";
 import { migrateToLatest } from "../../../packages/platform-store/src/migrate";
@@ -1668,6 +1669,54 @@ describe.skipIf(!appUrl || !migrationUrl)("BFF session recovery against real Pos
     const resumesAfterExhausted = (await fx.commandsOf(seeded.sid)).filter((row) => row.op === "resume");
     expect(resumesAfterExhausted.map((row) => row.id)).toEqual([attempt0]);
     expect(cellB.requests.filter((call) => call.path.endsWith("/events")).length).toBe(eventsBeforeExhausted);
+  }, 60_000);
+
+  it("still recovers and replays history for an archived session", async () => {
+    const fx = await createFixture();
+    const cellA = await startCell({ cellId: fx.cellId, bootId: "boot-A", tenantId: fx.tenantId, disk: fx.disk });
+    cells.push(cellA);
+    const seeded = await seedCommittedTurn(fx, cellA, "worker-archive-a");
+    const cellB = await startCell({ cellId: fx.cellId, bootId: "boot-B", tenantId: fx.tenantId, disk: fx.disk });
+    cells.push(cellB);
+
+    // 归档：binding 仍 active（归档不是撤权），只是 archived_at 置位。
+    const sessions = new SessionsRepository(fx.driverStore);
+    const archived = await sessions.setArchived(fx.tenantId, fx.owner.userId, seeded.sid, true);
+    expect(archived.archivedAt).not.toBeNull();
+    expect(archived.status).toBe("active");
+    expect((await fx.bindingOf(seeded.sid)).status).toBe("active");
+
+    // 订阅不被归档阻断：boot 不匹配 → 照常请求 resume + 503 session_reopening，
+    // 而不是 409 session_archived（完整历史必须可看，归档不能把会话变成只读墓碑）。
+    const runtime = makeRuntime({ store: fx.driverStore, cell: cellB, tenantId: fx.tenantId, workerId: "worker-archive-b", serviceToken: fx.serviceToken });
+    await expect(runtime.events(fx.owner, seeded.sid, 0, new AbortController().signal)).rejects.toMatchObject({
+      statusCode: 503,
+      code: "session_reopening",
+    });
+    const resumes = (await fx.commandsOf(seeded.sid)).filter((row) => row.op === "resume");
+    expect(resumes).toHaveLength(1);
+    expect(resumes[0]).toMatchObject({ status: "queued" });
+
+    // 恢复原语同样不因归档拒绝：结论是可读的 enqueued/pending（同 boot 合并），
+    // 既不是 denied 也不是 `binding-archived`，审计里也不该出现这条拒绝原因。
+    const recovery = new RuntimeSessionRecovery({ store: fx.driverStore });
+    const direct = await recovery.requestResume({ tenantId: fx.tenantId, sessionId: seeded.sid, bootId: "boot-B", reason: "archived-but-resumable" });
+    expect(["enqueued", "pending"]).toContain(direct.status);
+    expect((await fx.auditOf(seeded.sid)).some((event) => event.reason.includes("binding-archived"))).toBe(false);
+
+    // 正常投递 resume：会话在 boot-B 上重新打开，随后 cursor 0 订阅真的回放归档前历史。
+    const resumed = await runtime.dispatcher.dispatchOnce();
+    expect(resumed).toMatchObject({ claimed: 1, settled: 1 });
+    expect((await fx.commandsOf(seeded.sid)).find((row) => row.op === "resume")).toMatchObject({ status: "succeeded" });
+
+    const replay = new AbortController();
+    const stream = await runtime.events(fx.owner, seeded.sid, 0, replay.signal);
+    const seen = await drainUntilTurnEnd(stream, replay);
+    const userEvents = seen.filter((event) => event.type === "user");
+    expect(userEvents).toHaveLength(1);
+    expect(userEvents[0]).toMatchObject({ seq: seeded.userSeq, text: "重启前已提交的用户消息" });
+    expect(seen.filter((event) => event.type === "assistant")).toHaveLength(1);
+    expect(seen.filter((event) => event.type === "turn-end")).toHaveLength(1);
   }, 60_000);
 
   it("maps the reactive identity_invalid branch to the same terminal codes, with no resume and no send failure", async () => {

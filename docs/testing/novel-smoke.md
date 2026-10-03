@@ -13,8 +13,12 @@ node plugins/myrix-novel/tests/smoke/novel-cell-smoke.mjs
    `profiles/node_modules` 软链到锁定安装，`node_modules/@myrix/novel/` 是一个**真实包**
    （带 `exports`），因此根插件的 preset 行用**默认包名**解析子插件 —— 与部署镜像同构。
 3. 用**真实锁定 CLI**（`tests/poc/.dsh-install` 的 `dsh@0.2.0-rc.2`，vendor `639ed01`）启动，
-   由 `smoke-app.mjs` 探针实测：服务已提供、三个 preset 未损坏、根作用域没有小说工具、
-   每个 preset 的掩码正确、工具真的经 HTTP 打到作品服务、提示注入了服务端 workId。
+   由 `smoke-app.mjs` 探针实测：服务已提供、统一助手与三个历史 preset 未损坏、根作用域没有小说工具、
+   四个 preset 的实际可见工具与各自掩码精确相等（6/3/4/4）、工具真的经 HTTP 打到作品服务、提示注入了服务端 workId。
+   统一创作助手和历史掩码同时由
+   [plugin.test.ts](<../../plugins/myrix-novel/tests/plugin.test.ts>) 与
+   [preset-module.test.ts](<../../plugins/myrix-novel/tests/preset-module.test.ts>) 覆盖；
+   本次真实 DSH 冒烟8项探针通过，不代表真实模型供应商验收。
 4. 结束后删除 `.work/` 与 `.build/`，不留运行产物；退出码 = 探针是否全部通过。
 
 ## 不是什么

@@ -15,7 +15,7 @@
 
 | 行 | 模块 | 作用 |
 | --- | --- | --- |
-| 根插件 | `@myrix/novel`（[src/index.ts](../../plugins/myrix-novel/src/index.ts)） | 提供 `ctx.novelStore`，注册三个 preset |
+| 根插件 | `@myrix/novel`（[src/index.ts](../../plugins/myrix-novel/src/index.ts)） | 提供 `ctx.novelStore`，注册四个 preset（统一创作助手 + 三个历史受限 preset） |
 | preset 子插件 | `@myrix/novel/preset-tools`（[src/preset-tools.ts](../../plugins/myrix-novel/src/preset-tools.ts)） | 在被装载的 preset 作用域内注册该助手的工具与提示段落 |
 
 根插件导出形状遵循 DSH 的插件约定：具名 `name` / `inject` / `apply`，**没有 default export**。
@@ -34,15 +34,16 @@
 
 - `inject = ['tools', 'systemPrompt', 'agentPresets', 'principals']`。
   缺任何一个都不激活：本插件没有“没有身份也能跑”的降级形态。
-- **就绪语义**：`apply` 在返回前 `await` 三个 `agentPresets.register()`，所以
-  **`apply` resolve 即 `ctx.novelStore` 可读、三个 preset 已在 roster**。装配方仍应按
+- **就绪语义**：`apply` 在返回前 `await` 全部 `agentPresets.register()`，所以
+  **`apply` resolve 即 `ctx.novelStore` 可读、四个 preset 已在 roster**。装配方仍应按
   Cordis fiber 语义 `await ctx.plugin(...)`（Loader 的 `resolve` 回调就是本 `apply`）。
   副作用是：若宿主把它挂在 preset 子树之外或 `agentPresets` 不可用的位置，
   `register()` 会在装载阶段直接抛错 —— 这就是“明确 driver 挂载发现”失败的方式，
   不会静默跳过。
 - **配置没有默认 origin、没有默认凭据**：漏配即抛错，不会静默指向某个地址。
-- 注册的三个 preset ID 固定为 `novel-outline` / `novel-chapter` / `novel-bible`，
-  显示名/描述/order 见 [presets.ts](../../plugins/myrix-novel/src/presets.ts)。
+- 注册的四个 preset ID 固定为 `novel-assistant` / `novel-outline` / `novel-chapter` / `novel-bible`
+  （首版三个 ID 不得改名，新增只能追加），显示名/描述/order 见
+  [presets.ts](../../plugins/myrix-novel/src/presets.ts)。
 - 部署侧把 `origin` / `credential` 接在部署配置上；仓库的 Cell 装配层从环境变量读取
   （`MYRIX_WORKS_ORIGIN` / `MYRIX_WORKS_TOKEN`），见 [cell.patch.yml](../../bundles/myrix-base/cell.patch.yml)。
   `agentPresets.default` 仍是 `myrix-empty`：**没有会话绑定的一段预设不会拿到小说工具**；
@@ -57,9 +58,14 @@
 
 | preset | 工具 |
 | --- | --- |
+| `novel-assistant` | 六个工具全集：`get_outline`、`update_outline`、`get_chapter`、`save_chapter_draft`、`search_bible`、`update_bible_entry` |
 | `novel-outline` | `get_outline`、`update_outline`、`search_bible` |
 | `novel-chapter` | `get_outline`、`get_chapter`、`save_chapter_draft`、`search_bible` |
 | `novel-bible` | `get_outline`、`get_chapter`、`search_bible`、`update_bible_entry` |
+
+三个历史 preset 的掩码**逐字不变**（掩码只收窄、不扩大）；未知 preset 在协议层取不到
+工具集，注册方必须 fail-closed 拒绝。六个工具里没有 create/delete，助手不能新建作品、
+章节或设定条目，见 [ADR 0034](../adr/0034-novel-assistant-and-session-archive.md)。
 
 **不在根作用域注册**：`tools.schemas()` 永远为空，不属于某助手的工具对该助手
 `tools.schemas(agent)` 不可见，越权调用返回 `unknown tool`（不是“可见但被劝阻”）。
@@ -109,7 +115,7 @@ node plugins/myrix-novel/tests/smoke/novel-cell-smoke.mjs
 | 探针 | 期望 |
 | --- | --- |
 | `ctx.novelStore` 已提供 | ✅ |
-| 三个 preset 在 roster 且 `broken` 为空 | ✅（与 bundle 自带的 `myrix-empty` 并存） |
+| 历史三个 preset 在 roster 且 `broken` 为空 | ✅（脚本尚未探针统一助手；与 bundle 自带的 `myrix-empty` 并存） |
 | 根作用域小说工具数为 0 | ✅ |
 | 各 preset 掩码（实测可见工具名） | ✅ 与 `PRESET_TOOLS` 完全一致 |
 | `get_outline` 经真实 HTTP 打到替身作品服务并回传结果 | ✅ |
@@ -138,7 +144,7 @@ node plugins/myrix-novel/tests/smoke/novel-cell-smoke.mjs
 | 文件 | 覆盖 |
 | --- | --- |
 | [tests/tools.test.ts](../../plugins/myrix-novel/tests/tools.test.ts) | `execute` 契约：身份来源、身份字段注入拒绝、版本/ID/长度校验、冲突不伪装、只读工具免版本 |
-| [tests/plugin.test.ts](../../plugins/myrix-novel/tests/plugin.test.ts) | 真实 Cordis：preset roster、作用域可见性、掩码拒绝、撤权后立即拒绝、活性缺失 fail-closed、提示注入与撤权后不回显、卸载清理、一次真实 Agent 回合（替身模型） |
+| [tests/plugin.test.ts](../../plugins/myrix-novel/tests/plugin.test.ts) | 真实 Cordis：四个 preset roster、统一助手拿到六工具而三个历史 preset 不扩大、作用域可见性、掩码拒绝、撤权后立即拒绝、活性缺失 fail-closed、提示注入与撤权后不回显、卸载清理、一次真实 Agent 回合（替身模型） |
 | [tests/preset-module.test.ts](../../plugins/myrix-novel/tests/preset-module.test.ts) | preset 行默认包名、掩码一致性、提示安全约束（含“不含 token/Bearer”） |
 | [tests/output-contract.test.ts](../../plugins/myrix-novel/tests/output-contract.test.ts) | 工具输出投影：只回声明字段，不泄漏存储层内部字段 |
 | [tests/client.test.ts](../../plugins/myrix-novel/tests/client.test.ts) | HTTP 客户端边界：注入、会话/版本传递、409 保留、限额、origin、六工具掩码 |

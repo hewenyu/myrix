@@ -62,7 +62,7 @@ export interface SessionStreamState {
   needsReplay: boolean;
   /** 最近一次本机提交的命令，用于取消。 */
   lastCommandId: string | null;
-  send: (text: string) => Promise<void>;
+  send: (text: string) => Promise<boolean | void>;
   cancel: () => Promise<void>;
   sending: boolean;
   error: string | null;
@@ -259,12 +259,11 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
 
   const send = useCallback(
     async (text: string) => {
-      if (!sessionId) return;
-      // 该回调绑定的是创建时的归属代际。若它被延迟到会话切换之后才调用，
-      // 必须整体拒绝：既不发往旧 sid，也不写当前会话的状态。
-      if (!mountedRef.current || generationRef.current !== callbackGeneration) return;
+      if (!sessionId) return false;
+      // 迟到回调不发送，失败时输入框保留原稿。
+      if (!mountedRef.current || generationRef.current !== callbackGeneration) return false;
       const trimmed = text.trim();
-      if (trimmed.length === 0) return;
+      if (trimmed.length === 0) return false;
       const commandId = newCommandId();
       const isCurrent = (): boolean =>
         mountedRef.current && generationRef.current === callbackGeneration;
@@ -273,13 +272,15 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
       try {
         const queued = await sessions.send(sessionId, { commandId, text: trimmed });
         // 旧代际：请求可能已被服务端接受，但本地结果不再属于当前会话，直接丢弃。
-        if (!isCurrent()) return;
+        if (!isCurrent()) return false;
         setLastCommandId(queued.commandId);
         // 202 只表示平台已持久入队，不代表模型已回复——先本地标记为待回显。
         setChat((state) => appendPendingCommand(state, queued.commandId, trimmed));
+        return true;
       } catch (caught) {
-        if (!isCurrent()) return;
+        if (!isCurrent()) return false;
         setError(describeError(caught).message);
+        return false;
       } finally {
         if (isCurrent()) setSending(false);
       }

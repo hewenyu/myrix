@@ -4,15 +4,20 @@ import { useState } from "react";
 import { Banner, EmptyHint } from "../components/common";
 import { ConflictBanner } from "../components/ConflictBanner";
 import { ChapterAssistantContext } from "../components/ChapterAssistantContext";
+import { Icon } from "../components/Icon";
 import { PlainTextEditor } from "../components/PlainTextEditor";
 import type { DraftEditor } from "../state/useDraft";
 import { formatTime } from "./format";
 
-export interface ChapterListProps {
+export interface ChapterNavProps {
   chapters: Chapter[];
   isLoading: boolean;
   error: string | null;
   selectedChapterId: string | null;
+  /** 有未保存草稿的章节：目录里显式标注，切换走草稿前用户能看见代价。 */
+  dirtyChapterId: string | null;
+  /** 正在保存的章节。 */
+  savingChapterId: string | null;
   onSelect: (chapterId: string) => void;
   onCreate: (title: string) => void;
   createPending: boolean;
@@ -20,27 +25,52 @@ export interface ChapterListProps {
   onReload: () => void;
 }
 
-export function ChapterList({
+/** 章节条目的副标题：保存中/未保存优先于版本与时间。 */
+function chapterSubtitle(
+  chapter: Chapter,
+  dirtyChapterId: string | null,
+  savingChapterId: string | null,
+): string {
+  if (chapter.id === savingChapterId) return "保存中…";
+  if (chapter.id === dirtyChapterId) return "有未保存修改";
+  return `版本 ${chapter.version} · ${formatTime(chapter.updatedAt)}`;
+}
+
+/**
+ * 左侧目录里的章节区：章节列表 + **收起的新建**。
+ *
+ * 这里只负责“选谁”和“建一个”，正文一律由中栏的 ChapterEditor 显示，
+ * 目录里不再出现任何正文或大表单。一章都没有时新建表单直接展开：
+ * 空列表下再让用户先点一次“新建章节”没有意义。
+ */
+export function ChapterNav({
   chapters,
   isLoading,
   error,
   selectedChapterId,
+  dirtyChapterId,
+  savingChapterId,
   onSelect,
   onCreate,
   createPending,
   createError,
   onReload,
-}: ChapterListProps) {
+}: ChapterNavProps) {
   const [title, setTitle] = useState("");
+  const [creating, setCreating] = useState(false);
+  const showCreateForm = creating || chapters.length === 0;
 
   return (
-    <div className="stack">
+    <div className="stack nav-section" aria-label="章节目录">
       {error ? (
         <Banner level="error" actions={<button type="button" onClick={onReload}>重试</button>}>
           {error}
         </Banner>
       ) : null}
-      <ul className="list">
+      {isLoading ? <EmptyHint>正在读取章节…</EmptyHint> : null}
+      {!isLoading && chapters.length === 0 ? <EmptyHint>还没有章节。</EmptyHint> : null}
+
+      <ul className="list nav-list">
         {chapters.map((chapter) => (
           <li key={chapter.id}>
             <button
@@ -51,33 +81,47 @@ export function ChapterList({
             >
               {chapter.title}
               <span className="item-sub">
-                版本 {chapter.version} · {formatTime(chapter.updatedAt)}
+                {chapterSubtitle(chapter, dirtyChapterId, savingChapterId)}
               </span>
             </button>
           </li>
         ))}
       </ul>
-      {!isLoading && chapters.length === 0 ? <EmptyHint>还没有章节。</EmptyHint> : null}
 
-      <form
-        className="row"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (title.trim().length === 0) return;
-          onCreate(title.trim());
-          setTitle("");
-        }}
-      >
-        <input
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="新章节标题"
-          aria-label="新章节标题"
-        />
-        <button type="submit" disabled={createPending || title.trim().length === 0}>
-          {createPending ? "创建中…" : "新建章节"}
+      {showCreateForm ? (
+        <form
+          className="stack nav-create"
+          aria-label="新建章节表单"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const next = title.trim();
+            if (next.length === 0) return;
+            onCreate(next);
+            setTitle("");
+          }}
+        >
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="新章节标题"
+            aria-label="新章节标题"
+          />
+          <div className="row">
+            <button type="submit" className="primary" disabled={createPending || title.trim().length === 0}>
+              {createPending ? "创建中…" : "新建章节"}
+            </button>
+            {chapters.length > 0 ? (
+              <button type="button" onClick={() => setCreating(false)}>
+                收起
+              </button>
+            ) : null}
+          </div>
+        </form>
+      ) : (
+        <button type="button" className="nav-create-toggle" onClick={() => setCreating(true)}>
+          <Icon name="plus" size={14} /> 新建章节
         </button>
-      </form>
+      )}
       {createError ? <Banner level="error">{createError}</Banner> : null}
     </div>
   );

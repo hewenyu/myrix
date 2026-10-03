@@ -91,6 +91,8 @@ export const sessions = {
   create: (workId: string, preset: NovelPreset) =>
     requestJson<NovelSession>(`/works/${workId}/sessions`, { method: "POST", body: { preset } }),
   remove: (sessionId: string) => requestJson<null>(`/sessions/${sessionId}`, { method: "DELETE" }),
+  archive: (sessionId: string, archived: boolean) =>
+    requestJson<NovelSession>(`/sessions/${sessionId}`, { method: "PATCH", body: { archived } }),
   send: (sessionId: string, input: { commandId: string; text: string }) =>
     requestJson<QueuedCommand>(`/sessions/${sessionId}/messages`, { method: "POST", body: input }),
   cancel: (sessionId: string, commandId: string) =>

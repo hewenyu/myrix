@@ -44,7 +44,7 @@ describe("LoginPanel", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: /OIDC/ })).toBeDefined();
+    expect(screen.getByRole("button", { name: "登录我的书架" })).toBeDefined();
     expect(screen.queryByRole("button", { name: "作者 author" })).toBeNull();
     expect(screen.queryByRole("button", { name: "编辑 editor" })).toBeNull();
   });

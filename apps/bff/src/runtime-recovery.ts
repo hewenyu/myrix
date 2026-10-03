@@ -290,6 +290,8 @@ export class RuntimeSessionRecovery {
     if (binding.status !== "active") {
       return { status: "denied", reason: `binding-not-active: 绑定状态为 ${binding.status}，不接受恢复` };
     }
+    // 归档**不**参与恢复判定：归档只整理历史，不停止任务、不撤权。为订阅事件流或
+    // 投递已入队命令而需要的 resume 必须照常进行，否则"归档后还能看完整历史"无法成立。
 
     const existing = await this.listResumes(input.tenantId, input.sessionId, binding.revokedRevision, input.bootId).catch(
       (error: unknown) => {

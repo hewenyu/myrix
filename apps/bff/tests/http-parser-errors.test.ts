@@ -35,6 +35,7 @@ async function setup(overrides: Partial<Record<string, unknown>> = {}) {
     send: vi.fn(async (_actor, _id, input) => ({ commandId: input.commandId, status: "queued" as const })),
     cancel: vi.fn(async (_actor, _id, commandId) => ({ commandId, status: "queued" as const })),
     revoke: vi.fn(async () => {}),
+    archive: vi.fn(async () => { throw new Error("Not configured for this test"); }),
     events: vi.fn(async function* () {}) as unknown as RuntimeRouter["events"],
   };
   const app = await createBffServer({ auth: { mode: "development", origin, sessionTtlSeconds: 3600, repository: auth,

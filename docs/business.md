@@ -137,10 +137,11 @@ tenant
 | `id` | 会话 id（UUID），工具/模型调用都归因到它 |
 | `owner_user_id` | 单一所有者 |
 | `work_id` | 绑定的作品；工具不接受 workId 参数，由服务端从这里取 |
-| `preset` | `novel-outline / novel-chapter / novel-bible` |
+| `preset` | `novel-assistant`（统一创作助手，六工具全集）/ `novel-outline` / `novel-chapter` / `novel-bible`（历史受限 preset，掩码不变） |
 | `cell_id` | 当前放置的 Cell；工具调用必须与该 Cell 凭据一致 |
 | `status` | `creating / active / revoked / closed` |
 | `revoked_revision` | 撤权版本 `rev`；创建时为 1，撤权时 +1 |
+| `archived_at` | 归档时间；`null` = 未归档。**展示元数据，不是撤权**：不改 `status`/`rev`、不发 outbox、不停止任务，可恢复 |
 | `policy_revision` | 策略版本标记 |
 
 生命周期：
@@ -149,10 +150,14 @@ tenant
    （`sessions:create`），要求调用者是 owner；见
    [`SessionsRepository.create`](<../packages/platform-store/src/repositories/bindings.ts#L56-L130>)。
 2. 投递成功后绑定激活为 `active`，并记录 `cell_id`。
-3. `revoke`：`status=revoked` + `revoked_revision+1` + 同事务写 outbox 通知 Cell + 审计；
+3. `archive` / `restore`：`PATCH /sessions/:sessionId { archived }` 只写 `archived_at`
+   （[`setArchived`](<../packages/platform-store/src/repositories/bindings.ts#L365-L470>)），
+   仅所有者本人可操作，非所有者（含管理员）统一 404；它不是命令、不入队、不通知 Cell。
+4. `revoke`：`status=revoked` + `revoked_revision+1` + 同事务写 outbox 通知 Cell + 审计；
    撤权后的命令与发送一律拒绝；见
    [`revoke`](<../packages/platform-store/src/repositories/bindings.ts#L268-L356>)。
-4. `closed` 是存储层历史状态；对外与治理判定都按"不可用"处理，绝不当作"非 revoked 即放行"
+   归档与撤权正交：撤权是终态，可以作用在已归档会话上。
+5. `closed` 是存储层历史状态；对外与治理判定都按"不可用"处理，绝不当作"非 revoked 即放行"
    （[domain.ts](<../packages/platform-store/src/domain.ts#L30-L40>)）。
 
 ### 4.2 绑定快照与活性租约
@@ -168,17 +173,25 @@ tenant
 
 ---
 
-## 5. 三个助手与六个工具
+## 5. 统一创作助手、历史 preset 与六个工具
 
 | preset | 助手定位 | 可见工具 |
 | --- | --- | --- |
-| `novel-outline` | 大纲 | `get_outline`、`update_outline`、`search_bible` |
-| `novel-chapter` | 章节正文 | `get_outline`、`get_chapter`、`save_chapter_draft`、`search_bible` |
-| `novel-bible` | 设定管理 | `get_outline`、`get_chapter`、`search_bible`、`update_bible_entry` |
+| `novel-assistant` | 统一创作助手（新对话默认，无需用户选择） | `get_outline`、`update_outline`、`get_chapter`、`save_chapter_draft`、`search_bible`、`update_bible_entry` |
+| `novel-outline` | 历史：大纲 | `get_outline`、`update_outline`、`search_bible` |
+| `novel-chapter` | 历史：章节正文 | `get_outline`、`get_chapter`、`save_chapter_draft`、`search_bible` |
+| `novel-bible` | 历史：设定管理 | `get_outline`、`get_chapter`、`search_bible`、`update_bible_entry` |
 
-工具名与掩码的唯一来源是 [`novel-protocol`](<../packages/novel-protocol/src/index.ts#L4-L10>)；
+工具名与掩码的唯一来源是 [`novel-protocol`](<../packages/novel-protocol/src/index.ts#L4-L10>)
+的 `PRESET_TOOLS`：统一助手等于六个既有工具全集，三个历史 preset 的掩码**逐字不变**
+（掩码只收窄、不扩大）；未知 preset 取不到工具集，调用方必须 fail-closed 拒绝。
 工具在**各自 preset 的作用域内**注册，根作用域看不到任何小说工具
 （[preset-tools.ts](<../plugins/myrix-novel/src/preset-tools.ts#L59-L66>)）。
+“不需要用户选 preset”由**浏览器显式传默认值**表达，后端仍要求必填显式字段，不做隐式兜底。
+
+六个工具都**不能新建**作品/章节/设定条目，也不能删除内容或读章节版本历史：
+需要新对象时先在 UI 建立章节或条目，再由助手读取并处理；提示词要求助手如实说明能力边界，
+不得声称已完成新建。
 
 ### 5.1 六个工具与参数
 
@@ -259,6 +272,12 @@ tenant
   避免重复投递。
 - 状态变化与业务写入同事务，跨进程通知走 `outbox_messages`（至少一次投递）。
 
+**归档不是命令**：`PATCH /sessions/:id { archived }` 直接写展示元数据（见 §4.1），
+不产生 `commands` 行、不经过投递。归档期间唯一新增的边界是**拒绝新的 `send`**
+（`POST /messages` 返回 409 `session_archived`，提示恢复）；`cancel` 照常入队，
+事件流（含为订阅触发的必要 `resume`）、Cell 工具调用、授权快照与归档前已入队的命令
+都不受影响。恢复后新的 `send` 立即可用。
+
 > `202 queued` 只表示**数据库已持久入队**，不代表模型已完成；完成以持久助手消息与
 > 实际业务数据为准（[bff-api.md](<implementation/bff-api.md>)）。
 
@@ -274,6 +293,7 @@ tenant
 | 会话有效期 | 60 – 86,400 秒（部署指定） | [auth.ts](<../apps/bff/src/auth.ts#L58-L59>) |
 | 限流 | 每 IP 每分钟 120 次 | [server.ts](<../apps/bff/src/server.ts#L44>) |
 | 内容归属 | 单一 owner；同租户非属主 403、跨租户 404；admin 无正文旁路 | [works.ts](<../packages/platform-store/src/repositories/works.ts#L9-L10>) |
+| 归档/恢复 | 仅会话所有者本人；非所有者（含管理员）统一 404；复用 `sessions:read`，不新增动作、不扩大角色白名单 | [bindings.ts](<../packages/platform-store/src/repositories/bindings.ts#L365-L470>)、[ADR 0034](<adr/0034-novel-assistant-and-session-archive.md>) |
 | Cell 隔离 | **一 Cell 一租户**，重复即拒绝启动 | [runtime-cells.ts](<../apps/bff/src/runtime-cells.ts#L105-L150>) |
 | 首版租户规模 | 初始化为1 Cell / 1租户 / 1 owner；可补同租户成员，同一 IdP subject 不支持多租户切换 | [单机部署指南 §5](<deployment/self-hosting.md>) |
 | 工具面 | 六个工具；preset 掩码 + 部署策略交集，只能收窄 | [works-server.ts](<../apps/bff/src/works-server.ts#L106-L127>) |
@@ -295,5 +315,7 @@ tenant
 - 不接受模型或浏览器提交身份、作品、URL、凭据或任意附加字段。
 - 不允许跨作品的 `chapterId / entryId` 混用。
 - 不做内容层的"管理员代看/代改"。
+- 不把归档当撤权：归档不停止任务、不撤权、不禁 `cancel`/事件流/工具，只拒绝新的发送。
+- 不给助手新增 create 类工具：需要新章节/设定条目时先在 UI 建立，再让助手处理。
 - 不在 Cell 或浏览器保存上游模型密钥。
 - 不提供 `chat/completions` 兼容入口、协议转换或失败回退。

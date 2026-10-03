@@ -15,6 +15,12 @@ export const inject = ['appReady', 'agents', 'agentPresets', 'principals', 'tool
 const WID = 'w_smoke'
 const TID = 't_smoke'
 const UID = 'u_smoke'
+const masks = {
+  'novel-assistant': ['get_chapter', 'get_outline', 'save_chapter_draft', 'search_bible', 'update_bible_entry', 'update_outline'],
+  'novel-outline': ['get_outline', 'search_bible', 'update_outline'],
+  'novel-chapter': ['get_chapter', 'get_outline', 'save_chapter_draft', 'search_bible'],
+  'novel-bible': ['get_chapter', 'get_outline', 'search_bible', 'update_bible_entry'],
+}
 
 /** @param {import('@deepseek-ai/cordis').Context} ctx */
 export function apply(ctx, config) {
@@ -40,10 +46,10 @@ export function apply(ctx, config) {
       return { call: typeof ctx.novelStore.call }
     })
 
-    await probe('三个 preset 在 roster 且未损坏', async () => {
+    await probe('统一助手与三个历史 preset 在 roster 且未损坏', async () => {
       const rows = await ctx.agentPresets.list()
       const ids = rows.map(row => row.id).sort()
-      assert(ids.includes('novel-bible') && ids.includes('novel-chapter') && ids.includes('novel-outline'), `roster 缺少 preset: ${ids.join(',')}`)
+      assert(Object.keys(masks).every(preset => ids.includes(preset)), `roster 缺少 preset: ${ids.join(',')}`)
       const broken = rows.filter(row => row.broken !== undefined).map(row => [row.id, row.broken])
       assert(broken.length === 0, `preset 损坏: ${JSON.stringify(broken)}`)
       return { ids, broken }
@@ -56,7 +62,7 @@ export function apply(ctx, config) {
     })
 
     const perPreset = {}
-    for (const preset of ['novel-outline', 'novel-chapter', 'novel-bible']) {
+    for (const preset of Object.keys(masks)) {
       await probe(`preset ${preset} 的掩码与工具执行`, async () => {
         let seq = 0
         const sid = `session-${preset}`
@@ -73,6 +79,7 @@ export function apply(ctx, config) {
         seq += 1
         const visible = ctx.tools.schemas(agent).map(s => s.name).sort()
         perPreset[preset] = visible
+        assert(JSON.stringify(visible) === JSON.stringify(masks[preset]), `preset ${preset} 工具掩码不匹配: ${visible.join(',')}`)
 
         const asm = await ctx.systemPrompt.assemble({ agent, scope: agent })
         const promptText = asm.sections.map(s => s.text).filter(Boolean).join('\n')

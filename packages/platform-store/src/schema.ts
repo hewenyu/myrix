@@ -153,6 +153,14 @@ export interface SessionBindingsTable {
   created_at: Timestamp;
   updated_at: Timestamp;
   revoked_at: Timestamp | null;
+  /**
+   * 归档是**展示元数据**（列表分组/收起），不是撤权：
+   *   * 只阻止**新的 send**（BFF 在归档期间答 409 `session_archived`），restore 可逆；
+   *   * `status` / `revoked_revision` / `revoked_at` 不变、不发 outbox、不通知 cell；
+   *   * 事件流、Cell 工具权限/快照、恢复（resume）与归档前已入队的命令都不受影响；
+   *   * 行永远保留，历史会话可读可恢复；归档与撤权正交（撤权是终态）。
+   */
+  archived_at: Timestamp | null;
 }
 
 export interface CommandsTable {

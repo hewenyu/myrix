@@ -30,12 +30,13 @@ All paths below are under `/api/v1`, same origin. JSON errors `{ error, reason }
 
 ## Sessions
 
-- `GET /works/:workId/sessions` -> `{ items: NovelSession[] }`.
-- `POST /works/:workId/sessions` `{ preset: NovelPreset }` -> `NovelSession`.
-- `POST /sessions/:sessionId/messages` `{ commandId: UUID, text }` -> HTTP 202 `QueuedCommand`.
+- `GET /works/:workId/sessions` -> `{ items: NovelSession[] }`; includes archived sessions and excludes revoked ones; each item carries `archivedAt` (`null` when not archived).
+- `POST /works/:workId/sessions` `{ preset: NovelPreset }` -> `NovelSession`. `NovelPreset` is `novel-assistant` (unified assistant holding all six novel tools) plus the three historical restricted presets `novel-outline / novel-chapter / novel-bible`. The field is explicitly required; the browser supplies the default `novel-assistant` rather than the server guessing.
+- `PATCH /sessions/:sessionId` `{ archived: boolean }` -> updated `NovelSession`. Archive/restore is display metadata, not revocation: it does not change `status`/`rev`, notify the Cell or stop a task, and is reversible. Only the session owner may call it; everyone else (including admins, and across tenants) gets 404 to avoid leaking existence; 409 on a concurrent change; 410 if already revoked. While archived, only **new** `send` is rejected.
+- `POST /sessions/:sessionId/messages` `{ commandId: UUID, text }` -> HTTP 202 `QueuedCommand`; 409 `session_archived` while the session is archived (restore and retry). `cancel`, events, tool calls and already-queued commands keep working.
 - `POST /sessions/:sessionId/cancel` `{ commandId: UUID }` -> HTTP 202 `QueuedCommand`.
-- `DELETE /sessions/:sessionId` -> 204; revokes session, cancels and disposes live Agent.
-- `GET /sessions/:sessionId/events` -> SSE with event `message`, JSON `SessionStreamEvent`; only durable events carry `id: seq`. Browser native EventSource sends Last-Event-ID on reconnect. Replay of persisted messages, not transient deltas, is authoritative. Authentication is session cookie, no tokens in URL.
+- `DELETE /sessions/:sessionId` -> 204; revokes session (terminal), cancels and disposes live Agent.
+- `GET /sessions/:sessionId/events` -> SSE with event `message`, JSON `SessionStreamEvent`; only durable events carry `id: seq`. Archive does not close the stream or block replay/resume. Browser native EventSource sends Last-Event-ID on reconnect. Replay of persisted messages, not transient deltas, is authoritative. Authentication is session cookie, no tokens in URL.
 
 ## UX requirements
 

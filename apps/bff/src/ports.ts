@@ -29,6 +29,15 @@ export interface RuntimeRouter {
   send(actor: PlatformIdentity, sessionId: string, input: { commandId: string; text: string }): Promise<QueuedCommand>;
   cancel(actor: PlatformIdentity, sessionId: string, commandId: string): Promise<QueuedCommand>;
   revoke(actor: PlatformIdentity, sessionId: string): Promise<void>;
+  /**
+   * 归档 / 恢复一条**本人**会话（展示元数据，不是撤权）。
+   *
+   * 归档只整理历史：不停止任务、不改 `status`/`rev`、不发 outbox、不使凭证失效。
+   * 唯一新增的边界是拒绝**新的 send**（409 `session_archived`，提示恢复）；cancel、
+   * 事件流（含为订阅触发的必要 resume）、Cell 工具调用与已入队命令都不受影响。
+   * 授权与审计在存储层同一事务内完成；返回更新后的会话（含 archivedAt）。
+   */
+  archive(actor: PlatformIdentity, sessionId: string, archived: boolean): Promise<NovelSession>;
   /** Must authorize before resolving, then honor abort and continuously enforce current binding revision. */
   events(actor: PlatformIdentity, sessionId: string, after: number, signal: AbortSignal): Promise<AsyncIterable<SessionStreamEvent>>;
 }

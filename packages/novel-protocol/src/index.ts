@@ -3,11 +3,50 @@
 // Extracted unchanged from the runtime plugin to keep service installs DSH-free.
 export const NOVEL_TOOLS = ["get_outline", "update_outline", "get_chapter", "save_chapter_draft", "search_bible", "update_bible_entry"] as const;
 export type NovelToolName = typeof NOVEL_TOOLS[number];
+
+/**
+ * 统一创作助手 ID（唯一"全工具"preset，BFF 与 Cell 的默认值）。
+ * 用户的"不需要选 preset"由服务端默认值表达，浏览器仍可显式指定历史 preset。
+ */
+export const NOVEL_ASSISTANT_PRESET = "novel-assistant";
+
+/** 历史三 preset：各自只做一类创作任务，掩码必须保持收窄（不得扩大）。 */
+export const LEGACY_NOVEL_PRESETS = ["novel-outline", "novel-chapter", "novel-bible"] as const;
+
+/**
+ * preset → 工具掩码。**这是唯一的真相来源**：
+ *   * `novel-assistant` = 现有六个工具全集（一个助手在自然对话中自行判断
+ *     大纲/正文/设定任务），不新增任何通用工具；
+ *   * 三个历史 preset 保持原掩码逐字不变 —— 历史会话重放时其中任何一个都
+ *     拿不到超出原有范围的工具（掩码只收窄，不扩大）。
+ */
 export const PRESET_TOOLS = {
+  "novel-assistant": NOVEL_TOOLS,
   "novel-outline": ["get_outline", "update_outline", "search_bible"],
   "novel-chapter": ["get_outline", "get_chapter", "save_chapter_draft", "search_bible"],
   "novel-bible": ["get_outline", "get_chapter", "search_bible", "update_bible_entry"],
 } as const satisfies Record<string, readonly NovelToolName[]>;
+
+/** 全部已登记 preset ID（统一助手在前，历史 preset 顺序不变）。 */
+export const PRESET_IDS = [NOVEL_ASSISTANT_PRESET, ...LEGACY_NOVEL_PRESETS] as const;
+export type NovelPresetId = typeof PRESET_IDS[number];
+
+const PRESET_TOOL_SETS: Record<string, ReadonlySet<string>> = Object.fromEntries(
+  Object.entries(PRESET_TOOLS).map(([preset, tools]) => [preset, new Set<string>(tools)]),
+);
+
+export function isNovelPreset(value: unknown): value is NovelPresetId {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(PRESET_TOOL_SETS, value);
+}
+
+/**
+ * 未知 preset 得到 `undefined`（调用方必须 fail-closed 拒绝）。
+ * 绝不回退到"全集"或"默认助手"——那是权限扩大。
+ */
+export function toolsForPreset(preset: string): readonly NovelToolName[] | undefined {
+  if (!isNovelPreset(preset)) return undefined;
+  return [...PRESET_TOOLS[preset]];
+}
 
 export interface ToolArguments {
   chapterId?: string;

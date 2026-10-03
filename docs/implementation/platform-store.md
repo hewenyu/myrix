@@ -10,7 +10,7 @@
 | 路径 | 内容 |
 | --- | --- |
 | `packages/platform-store/src/` | Postgres + Kysely 存储：typed schema、10 个仓储、CAS、命令队列、outbox、审计 |
-| `packages/platform-store/src/migrations/` | `0000`–`0009` + `0099`/`0100` 共 12 个 SQL 迁移 |
+| `packages/platform-store/src/migrations/` | `0000`–`0011` + `0099`/`0100` 共 14 个 SQL 迁移（`0010` 加统一助手 preset 与 `archived_at`，`0011` 删除已无意义的归档约束） |
 | `packages/platform-store/src/index.ts` | **冻结给 BFF 的公开导出** |
 | `packages/platform-store/src/testing/index.ts` | 测试专用导出（`createTestAuthorizer` 只在这里） |
 | `packages/platform-store/src/bin/migrate.ts` `seed.ts` | 迁移 / 开发种子入口 |

@@ -4,6 +4,7 @@ import type { PlatformStore, StoreTx } from "../store";
 import {
   isSessionPreset,
   sessionStatusForGovernance,
+  SESSION_PRESETS,
   type BindingStatus,
   type SessionPreset,
 } from "../domain";
@@ -40,6 +41,8 @@ export interface SessionBindingRecord {
   createdAt: string;
   updatedAt: string;
   revokedAt: string | null;
+  /** 归档时间（ISO8601）；`null` = 未归档。归档是展示元数据，不是撤权。 */
+  archivedAt: string | null;
 }
 
 export interface CreateBindingInput {
@@ -69,7 +72,7 @@ export class SessionsRepository {
   ): Promise<SessionBindingRecord> {
     if (!isSessionPreset(input.preset)) {
       throw errors.invalidInput(
-        `preset 必须是 novel-outline / novel-chapter / novel-bible，收到 ${String(input.preset)}`,
+        `preset 必须是 ${SESSION_PRESETS.join(" / ")} 之一，收到 ${String(input.preset)}`,
       );
     }
     const sessionId = input.sessionId ?? randomId();
@@ -360,6 +363,114 @@ export class SessionsRepository {
       return toBindingRecord(row);
     });
   }
+
+  /**
+   * 归档 / 恢复一条会话（**展示元数据**，不是撤权）。
+   *
+   * 语义边界（与 `revoke` 严格区分，二者不可互相替代）：
+   *   * 只写 `archived_at`（置位 = 归档，置 null = 恢复）；**不动** `status`、
+   *     **不动** `revoked_revision`、**不写** outbox、不通知 cell；
+   *   * 归档不使任何已签发的凭证失效，也不改写历史：行保留，版本与命令历史保留；
+   *   * 归档**不停止任务**：它只整理历史（列表分组）。归档期间唯一新增的边界是
+   *     BFF 拒绝**新的 send**（409 `session_archived`）；cancel、事件流（含为订阅
+   *     触发的必要 resume）、Cell 工具权限/快照与归档前已入队的命令都照常工作。
+   *
+   * 授权（必须与 BFF 路由一致，不能只靠路由）：
+   *   * 只有会话**所有者本人**可以归档/恢复：`owner_user_id` 不匹配时按 not_found
+   *     处理（不泄漏他人会话是否存在），管理员同样不能归档他人会话；
+   *   * 之后仍走 `authorizeTx`（生产 = governance），动作复用 `sessions:read`：
+   *     归档/恢复是元数据变更、不扩大任何内容权限，因此不引入新的授权动作名。
+   *     reason 会明确写出"归档不是撤权"，避免审计把两者混淆。
+   *
+   * 幂等：重复归档 / 重复恢复返回当前记录，不重复写审计之外的任何状态变化。
+   */
+  async setArchived(
+    tenantId: string,
+    actorUserId: string,
+    bindingId: string,
+    archived: boolean,
+  ): Promise<SessionBindingRecord> {
+    if (typeof archived !== "boolean") {
+      throw errors.invalidInput("archived 必须是布尔值");
+    }
+    return this.store.withTenant({ tenantId, actorUserId }, async (tx) => {
+      const current = await loadBinding(tx, bindingId);
+
+      // 所有者事实优先于一切：非所有者一律 not_found（与列表/读取同一口径）。
+      if (current.owner_user_id !== actorUserId) {
+        throw errors.notFound("binding-not-found: 会话绑定不存在");
+      }
+
+      // 撤权是终态：归档/恢复都不得触碰已撤权会话（撤销后 archived_at 只是遗留的
+      // 展示元数据，既不可读也不可改；这里对写入 fail-closed）。
+      if (current.status === "revoked") {
+        throw errors.revoked("binding-revoked: 会话已撤权，不能归档或恢复");
+      }
+
+      const status = sessionStatusForGovernance(current.status);
+      if (status === null) {
+        await insertDenyEvent(tx, {
+          actorUserId,
+          actorKind: "user",
+          action: "sessions:read",
+          resource: `session_binding:${current.id}`,
+          reason: `unknown-session-status: 会话状态 ${current.status} 不在治理状态集内，按拒绝处理`,
+          sessionId: current.id,
+          workId: current.work_id,
+        });
+        throw errors.forbidden(
+          `unknown-session-status: 会话状态 ${current.status} 不可用于判定，按拒绝处理`,
+        );
+      }
+
+      await authorizeTx(this.store, tx, {
+        actorUserId,
+        action: "sessions:read",
+        resource: {
+          kind: "session_binding",
+          tenantId,
+          ownerUserId: current.owner_user_id,
+          status,
+          revision: current.revoked_revision,
+        },
+        expectedRevision: current.revoked_revision,
+      });
+
+      const already = current.archived_at !== null;
+      if (already === archived) return toBindingRecord(current);
+
+      // CAS：并发归档/恢复与撤权之间不允许互相覆盖。撤权会 bump revoked_revision，
+      // 因此"归档态 + rev"一起比较就能挡住"读到 active 后又被人撤权"的竞态。
+      // 归档态用 `is null` / `is not null` 而不是绑定参数：Kysely 对 `is <参数>`
+      // 生成 `is $1`（Postgres 语法错误），对字面 null 才生成 `is null`。
+      const row = await tx.trx
+        .updateTable("session_bindings")
+        .set({ archived_at: archived ? new Date(this.store.now().getTime()) : null })
+        .where("id", "=", bindingId)
+        .where("revoked_revision", "=", current.revoked_revision)
+        .where("archived_at", current.archived_at === null ? "is" : "is not", null)
+        .returningAll()
+        .executeTakeFirst();
+      if (!row) {
+        throw errors.conflict("archive-race: 会话归档状态在更新过程中被并发修改，请重新读取");
+      }
+
+      await insertAuditEvent(tx, {
+        actorUserId,
+        actorKind: "user",
+        category: "data-write",
+        action: "sessions:archive",
+        resource: `session_binding:${bindingId}`,
+        effect: "allow",
+        reason: archived
+          ? `会话已归档（展示元数据，不是撤权）：archived_at 置位，rev=${row.revoked_revision} 不变、不发 outbox、凭证不失效；只拒绝新的 send，已在执行的任务、已入队命令、事件历史与工具权限都不受影响`
+          : "会话已恢复：archived_at 置回 null，新的 send 立即可用；rev 与凭证不受影响",
+        sessionId: bindingId,
+        workId: row.work_id,
+      });
+      return toBindingRecord(row);
+    });
+  }
 }
 
 /**
@@ -425,6 +536,7 @@ function toBindingRecord(row: {
   created_at: Date;
   updated_at: Date;
   revoked_at: Date | null;
+  archived_at: Date | null;
 }): SessionBindingRecord {
   return {
     tenantId: row.tenant_id,
@@ -439,5 +551,6 @@ function toBindingRecord(row: {
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     revokedAt: row.revoked_at ? row.revoked_at.toISOString() : null,
+    archivedAt: row.archived_at ? row.archived_at.toISOString() : null,
   };
 }

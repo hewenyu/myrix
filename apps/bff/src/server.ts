@@ -106,7 +106,9 @@ export async function createBffServer(deps: BffDependencies): Promise<FastifyIns
   app.get<{ Params: WorkParams }>("/api/v1/works/:workId/sessions", { schema: { params: params("workId") } },
     async request => ({ items: await repo.listSessions(requireIdentity(request), request.params.workId) }));
   app.post<{ Params: WorkParams; Body: { preset: NovelPreset } }>("/api/v1/works/:workId/sessions", {
-    schema: { params: params("workId"), body: body({ preset: { type: "string", enum: ["novel-outline", "novel-chapter", "novel-bible"] } }) },
+    // `novel-assistant` 是统一创作助手（六工具全集）。浏览器仍可显式选择历史 preset；
+    // 服务端默认值（novel-web 传 novel-assistant）表达"作者不需要选 preset"。
+    schema: { params: params("workId"), body: body({ preset: { type: "string", enum: ["novel-assistant", "novel-outline", "novel-chapter", "novel-bible"] } }) },
   }, async (request, reply) => reply.code(201).send(await deps.runtime.createSession(requireIdentity(request), request.params.workId, request.body.preset)));
   app.post<{ Params: SessionParams; Body: { commandId: string; text: string } }>("/api/v1/sessions/:sessionId/messages", {
     schema: { params: params("sessionId"), body: body({ commandId: uuid, text: { type: "string", minLength: 1, maxLength: 100_000, pattern: "\\S" } }) },
@@ -114,6 +116,11 @@ export async function createBffServer(deps: BffDependencies): Promise<FastifyIns
   app.post<{ Params: SessionParams; Body: { commandId: string } }>("/api/v1/sessions/:sessionId/cancel", {
     schema: { params: params("sessionId"), body: body({ commandId: uuid }) },
   }, async (request, reply) => reply.code(202).send(await deps.runtime.cancel(requireIdentity(request), request.params.sessionId, request.body.commandId)));
+  // 归档是展示元数据（不是撤权）：显式布尔值，缺字段即 400（fail-closed，不接受默认值）。
+  // CSRF / Origin 校验由 registerAuth 的统一 hook 覆盖（PATCH 属于 mutating 方法）。
+  app.patch<{ Params: SessionParams; Body: { archived: boolean } }>("/api/v1/sessions/:sessionId", {
+    schema: { params: params("sessionId"), body: body({ archived: { type: "boolean" } }) },
+  }, async request => deps.runtime.archive(requireIdentity(request), request.params.sessionId, request.body.archived));
   app.delete<{ Params: SessionParams }>("/api/v1/sessions/:sessionId", { schema: { params: params("sessionId") } }, async (request, reply) => {
     await deps.runtime.revoke(requireIdentity(request), request.params.sessionId);
     return reply.code(204).send();

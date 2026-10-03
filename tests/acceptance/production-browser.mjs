@@ -5,10 +5,15 @@
  *
  * 这个 runner 只负责"未来 GitHub Actions 正式镜像"上线后由人工在真实 VPS 上执行的
  * 两层验收：
- *   1) 生产登录：真实前端 OIDC 按钮 → 真实 Keycloak 登录表单 → BFF
+ *   1) 生产登录：真实前端 OIDC 按钮（“登录我的书架”）→ 真实 Keycloak 登录表单 → BFF
  *      `/api/v1/auth/callback`（Authorization Code + PKCE(S256)，走 standard flow）；
- *   2) 最小存储 smoke：用已授权的工作台 UI 创建一个明确标注验收前缀的作品，
- *      保存一段最小章节正文，刷新页面确认持久。
+ *   2) 最小存储 smoke：用已授权的工作台 UI 创建一本明确标注验收前缀的作品
+ *      （书架 → 新建书本 → 书名/简介 → 创建并开始写作），保存一段最小章节正文，刷新页面确认持久。
+ *
+ * 会话生命周期 smoke（创建 → 有界确认 active → 撤权 204）**不经过 UI 发送消息**：
+ * 新版统一创作 Agent 没有 preset grid，会话只在首条消息发送时创建，而发送必然触发真实模型
+ * 回合——生产验收明确禁止发送模型请求（见下）。因此会话由**同源已认证的公开 API**创建，
+ * 随后仍在真实 UI 的历史对话里选中该会话并用“永久结束对话”撤权；全程不触碰消息端点。
  *
  * 它**不**重复 `tests/acceptance/local-browser.mjs` / `business-journey.mjs` 的完整业务链路，
  * 也**不**发送任何模型请求（真实模型 + 完整工具的验收由 Lead 用现有 runner 负责）。
@@ -108,7 +113,8 @@ const SAFE_MESSAGES = Object.freeze({
   chapter_save_failed: '通过工作台 UI 保存验收章节失败',
   chapter_not_persisted: '刷新前经同源 API 读取章节正文与提交内容不一致',
   chapter_not_visible_after_reload: '刷新页面后章节正文未从服务端恢复',
-  session_create_failed: '通过工作台 UI 创建助手会话失败',
+  session_create_failed: '通过同源已认证公开 API 创建助手会话失败（统一 Agent 的 UI 只在发送首条消息时建会话，而生产验收不得发送模型请求）',
+  session_select_failed: '未能在真实 UI 的历史对话里唯一选中刚创建的验收会话',
   session_activation_timeout: '创建会话后未在有界时间内观测到 active；拒绝撤销一个未激活的会话',
   session_activation_invalid: '同源会话列表未包含刚创建的会话 id（或响应不可解析）；拒绝继续',
   session_already_revoked: '刚创建的会话已是 revoked/closed 状态；拒绝把本次验收标记为通过',
@@ -452,6 +458,65 @@ async function firstVisible(page, selectors) {
   return null;
 }
 
+/** 登录后的唯一入口是书架（`<main aria-label="我的书架">`，角色按 HTML-AAM 是 main）。 */
+function shelfOf(page) {
+  return page.getByRole('main', { name: '我的书架', exact: true });
+}
+
+/** 打开书的唯一显式动作是封面按钮 `aria-label="打开书本：<title>"`。 */
+async function openBook(page, bookTitle) {
+  await shelfOf(page).getByRole('button', { name: `打开书本：${bookTitle}`, exact: true }).click();
+}
+
+/**
+ * 章节新建表单在有章节时默认收起；展开态只渲染提交按钮、收起态只渲染同名开关。
+ * 先看标题输入框在不在，不在就先点开开关，避免同名按钮歧义。
+ */
+async function openChapterCreateForm(page) {
+  const input = page.getByLabel('新章节标题', { exact: true });
+  if (!(await input.isVisible().catch(() => false))) {
+    await page.getByRole('button', { name: '新建章节', exact: true }).click();
+  }
+  await input.waitFor();
+  return input;
+}
+
+/**
+ * 统一 Agent 的会话只在首条消息发送时创建，而生产验收不得发送模型请求。
+ * 因此用**同源已认证的公开 API**（浏览器 context 自带的 cookie jar + `GET /auth/session`
+ * 里的 CSRF，绝不伪造凭据）创建 novel-assistant 会话；返回 `{ status, body }` 形状，
+ * 与 `withResponse` 一致，便于沿用既有的捕获/断言路径。
+ */
+async function createAcceptanceSession(context, origin, workId) {
+  const authSession = await context.request.get(`${origin}/api/v1/auth/session`, { maxRedirects: 0, timeout: 15_000 });
+  const csrf = authSession.status() === 200 ? (await authSession.json().catch(() => null))?.csrfToken : null;
+  if (typeof csrf !== 'string' || csrf.length === 0) return { status: 0, body: null };
+  const response = await context.request.post(`${origin}/api/v1/works/${workId}/sessions`, {
+    headers: { origin, 'content-type': 'application/json', 'x-csrf-token': csrf },
+    data: { preset: 'novel-assistant' },
+    maxRedirects: 0,
+    timeout: 15_000,
+  });
+  return { status: response.status(), body: await response.json().catch(() => null) };
+}
+
+/**
+ * 在真实 UI 里选中刚创建的验收会话：历史对话默认收起 → 展开 → 刷新列表 →
+ * 点“创作 Agent · 1”（新作品里唯一一条，标题 + 序号 + 时间，不展示 uuid）。
+ */
+async function selectAcceptanceSession(page) {
+  const historyToggle = page.getByRole('button', { name: '历史对话', exact: true });
+  if ((await historyToggle.getAttribute('aria-expanded')) !== 'true') await historyToggle.click();
+  const history = page.locator('.conversation-history');
+  await history.waitFor();
+  await history.getByRole('button', { name: '刷新', exact: true }).click();
+  const item = history.getByRole('button').filter({ hasText: '创作 Agent · 1' }).first();
+  const listed = await item.waitFor({ timeout: 30_000 }).then(() => true, () => false);
+  if (!listed) throw new AcceptanceError('session_select_failed');
+  await item.click();
+  await page.locator('.session-options').waitFor();
+}
+
 async function submitKeycloakForm(page) {
   const submit = await firstVisible(page, ['#kc-login', 'input[name="login"]', 'button[type="submit"]', 'input[type="submit"]']);
   if (!submit) throw new AcceptanceError('idp_submit_missing');
@@ -585,6 +650,7 @@ export async function main(env = process.env) {
     workId: null,
     chapterId: null,
     sessionId: null,
+    sessionCreatedVia: null,
     sessionActivation: null,
     sessionRevoked: false,
     passwordChanged: false,
@@ -657,7 +723,7 @@ export async function main(env = process.env) {
     step = 'oidc-login';
     await Promise.all([
       page.waitForURL(url => url.origin === input.origin && url.pathname.startsWith('/auth/realms/myrix/'), { timeout: 45_000 }).catch(() => null),
-      page.getByRole('button', { name: '使用企业账号登录（OIDC）', exact: true }).click(),
+      page.getByRole('button', { name: '登录我的书架', exact: true }).click(),
     ]);
     // 无论 performOidcLogin 成功还是抛错，都把进度折叠进报告（finally 里也再同步一次）。
     const progress = await performOidcLogin(page, input, passwordProgress, external);
@@ -674,7 +740,7 @@ export async function main(env = process.env) {
     mark('session-established');
 
     step = 'workbench';
-    await page.getByRole('region', { name: '作品列表', exact: true }).waitFor();
+    await shelfOf(page).waitFor();
     mark('workbench');
 
     step = 'dev-login-disabled';
@@ -683,11 +749,12 @@ export async function main(env = process.env) {
     mark('dev-login-disabled');
 
     step = 'create-work';
-    const list = page.getByRole('region', { name: '作品列表', exact: true });
     const title = `${ACCEPTANCE_TITLE_PREFIX}${run}`;
-    await list.getByLabel('标题', { exact: true }).fill(title);
-    await list.getByLabel('简介', { exact: true }).fill('生产 OIDC 验收自动创建，请保留供人工核对，勿用于真实创作。');
-    const created = await withResponse(page, '/api/v1/works', 'POST', () => list.getByRole('button', { name: '创建作品', exact: true }).click());
+    await shelfOf(page).getByRole('button', { name: '新建书本', exact: true }).click();
+    const createDialog = page.getByRole('dialog');
+    await createDialog.getByLabel('书名', { exact: true }).fill(title);
+    await createDialog.getByLabel('简介').fill('生产 OIDC 验收自动创建，请保留供人工核对，勿用于真实创作。');
+    const created = await withResponse(page, '/api/v1/works', 'POST', () => createDialog.getByRole('button', { name: '创建并开始写作', exact: true }).click());
     if (created.status !== 201 || typeof created.body?.id !== 'string' || !UUID.test(created.body.id)) {
       throw new AcceptanceError('work_create_failed');
     }
@@ -696,9 +763,10 @@ export async function main(env = process.env) {
     mark('create-work');
 
     step = 'create-chapter';
-    await page.getByRole('tab', { name: '章节', exact: true }).click();
+    await page.getByRole('button', { name: '章节', exact: true }).click();
     const chapterTitle = `${ACCEPTANCE_CHAPTER_PREFIX}${run}`;
-    await page.getByLabel('新章节标题').fill(chapterTitle);
+    const chapterInput = await openChapterCreateForm(page);
+    await chapterInput.fill(chapterTitle);
     const chapter = await withResponse(
       page,
       `/api/v1/works/${report.workId}/chapters`,
@@ -734,11 +802,11 @@ export async function main(env = process.env) {
     const persisted = await readBack.json().catch(() => null);
     if (readBack.status() !== 200 || persisted?.text !== chapterText) throw new AcceptanceError('chapter_not_persisted');
     await page.reload({ waitUntil: 'domcontentloaded' });
-    const reloadedList = page.getByRole('region', { name: '作品列表', exact: true });
-    await reloadedList.waitFor();
-    await reloadedList.getByRole('button').filter({ hasText: title }).click();
-    await page.getByRole('tab', { name: '章节', exact: true }).click();
-    await page.getByRole('button').filter({ hasText: chapterTitle }).click();
+    await shelfOf(page).waitFor();
+    // 刷新后回到书架（书内选择不持久化），再显式打开验收书；章节列表在左栏 nav 的“章节”具名 region 里。
+    await openBook(page, title);
+    await page.getByRole('button', { name: '章节', exact: true }).click();
+    await page.getByRole('region', { name: '章节', exact: true }).getByRole('button').filter({ hasText: chapterTitle }).first().click();
     const visibleAfterReload = await page.waitForFunction(({ label, expected }) => {
       const node = document.querySelector(`[aria-label="${label}"] [contenteditable="true"]`);
       if (!node) return false;
@@ -752,23 +820,18 @@ export async function main(env = process.env) {
     mark('verify-persistence');
 
     step = 'session-smoke';
-    const sessionCreated = await withResponse(
-      page,
-      `/api/v1/works/${report.workId}/sessions`,
-      'POST',
-      () => page.getByRole('button', { name: '新建会话（章节写作）', exact: true }).click(),
-    );
+    // 统一创作 Agent 的 UI 只在“发送首条消息”时创建会话，而发送必然触发真实模型回合；
+    // 生产验收禁止模型请求，因此会话由同源已认证公开 API 创建（见 createAcceptanceSession）。
+    // 之后的选中与撤权仍走真实 UI：历史对话 → 刷新 → “创作 Agent · 1” → 永久结束对话。
+    const sessionCreated = await createAcceptanceSession(context, input.origin, report.workId);
     if (sessionCreated.status !== 201 || typeof sessionCreated.body?.id !== 'string' || !UUID.test(sessionCreated.body.id)) {
       throw new AcceptanceError('session_create_failed');
     }
     // 先捕获 created id：**即使后续激活失败**，报告也必须带上这个已创建的真实 id，
     // 便于人工按 id 清理，而不是在失败路径上丢掉证据。
     report.sessionId = sessionCreated.body.id;
-    await page.getByRole('button', { name: '撤销会话', exact: true }).waitFor();
-    if ((await page.locator('[data-testid="chat-log"] .msg').count()) !== 0) {
-      throw new AcceptanceError('unexpected_model_activity');
-    }
-    report.checks.push('Created a durable assistant session through the UI without sending any model request');
+    report.sessionCreatedVia = 'same-origin-authenticated-api';
+    report.checks.push('Created a durable novel-assistant session through the same-origin authenticated API without sending any model request (the unified-Agent UI creates a session only when a message is sent)');
 
     // 201 只代表"绑定 + create 命令已入队"（creating）；真正的激活在 cell 回执之后。
     // 撤销一个尚未激活的会话在生产语义里毫无意义，因此这里用**同源已认证**的
@@ -787,11 +850,23 @@ export async function main(env = process.env) {
     report.sessionActivation = activation;
     report.checks.push('Polled the same-origin authenticated session list until the exact created session reached active (bounded, no model request)');
 
+    // 真实 UI 选中刚创建的会话（历史对话默认收起；列表只展示标题 + 序号 + 时间，不展示 uuid）。
+    await selectAcceptanceSession(page);
+    report.checks.push('Selected the exact created session from the real conversation-history UI without any model request');
+    // 选中的会话里必须没有任何消息：本 runner 全程不发送模型请求。
+    if ((await page.locator('[data-testid="chat-log"] .msg').count()) !== 0) {
+      throw new AcceptanceError('unexpected_model_activity');
+    }
+
+    // “永久结束对话”带 window.confirm：显式接受后仍要 DELETE 204 才算撤销成功。
+    page.once('dialog', dialog => dialog.accept());
+    const sessionOptions = page.locator('.session-options');
+    if (!(await sessionOptions.evaluate(node => node.open))) await sessionOptions.locator('summary').click();
     const revoked = await withResponse(
       page,
       `/api/v1/sessions/${report.sessionId}`,
       'DELETE',
-      () => page.getByRole('button', { name: '撤销会话', exact: true }).click(),
+      () => page.getByRole('button', { name: '永久结束对话', exact: true }).click(),
     );
     // 非 204 不是"撤销成功"：必须显式失败，绝不在此后仍然报告 passed=true。
     assertSessionRevoked(revoked);

@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   sessionsList: vi.fn(),
   sessionsCreate: vi.fn(),
   sessionsRemove: vi.fn(),
+  sessionsArchive: vi.fn(),
 }));
 
 // 只替换网络边界：query key 工具、错误分类等保持真实实现。
@@ -42,6 +43,7 @@ vi.mock("../src/api/endpoints", async (importOriginal) => {
       list: mocks.sessionsList,
       create: mocks.sessionsCreate,
       remove: mocks.sessionsRemove,
+      archive: mocks.sessionsArchive,
     },
   };
 });
@@ -95,6 +97,10 @@ const sessionA: NovelSession = {
   status: "active",
   createdAt: "2026-01-01T00:00:00.000Z",
 };
+/** 同一作品的第二条会话：归档只替换目标条目，不能连坐。 */
+const sessionA2: NovelSession = { ...sessionA, id: "session-a2", preset: "novel-assistant" };
+const sessionB: NovelSession = { ...sessionA, id: "session-b", workId: "wB" };
+const ARCHIVED_AT = "2026-02-02T00:00:00.000Z";
 
 /** 章节列表按作品返回：A 空、B 有自己的章节。 */
 function stubChapterLists() {
@@ -361,5 +367,174 @@ describe("useWorkspace mutation 目标冻结：切换作品后晚到结果不得
     ).toEqual(["chapter-b"]);
     const keys = invalidate.mock.calls.map(([filters]) => (filters as { queryKey: unknown }).queryKey);
     expect(keys).not.toContainEqual(workKeys.chapters("wB"));
+  });
+});
+
+/**
+ * 归档与创建/删除一样，必须把**调用当时的作品 identity** 冻结进 results/cache：
+ * 晚到的归档回包只能写回原作品的会话缓存，不能覆盖用户后来切到的作品。
+ */
+describe("useSessions archive 目标冻结：晚到归档结果不得写到别的作品缓存", () => {
+  it("晚到的 archive 只写原作品缓存（A→B），且只替换同 id 条目", async () => {
+    mocks.sessionsList.mockImplementation((workId: string) =>
+      Promise.resolve({ items: workId === "wA" ? [sessionA, sessionA2] : [sessionB] }),
+    );
+    const pending = deferred<NovelSession>();
+    mocks.sessionsArchive.mockReturnValue(pending.promise);
+    const { client, wrapper } = harness();
+    const setQueryData = vi.spyOn(client, "setQueryData");
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    const { result, rerender } = renderHook(({ workId }: { workId: string }) => useSessions(workId), {
+      wrapper,
+      initialProps: { workId: "wA" },
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    let archivePromise!: Promise<NovelSession>;
+    act(() => {
+      archivePromise = result.current.archive("session-a", true);
+    });
+    rerender({ workId: "wB" });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      pending.resolve({ ...sessionA, archivedAt: ARCHIVED_AT });
+      await archivePromise;
+    });
+
+    expect(mocks.sessionsArchive).toHaveBeenCalledWith("session-a", true);
+
+    const writesToA = setQueryData.mock.calls.filter(
+      ([key]) => JSON.stringify(key) === JSON.stringify(workKeys.sessions("wA")),
+    );
+    expect(writesToA).toHaveLength(1);
+    const updater = writesToA[0]?.[1] as (
+      previous: { items: NovelSession[] } | undefined,
+    ) => { items: NovelSession[] };
+    const next = updater({ items: [sessionA, sessionA2] });
+    expect(next.items.find((item) => item.id === "session-a")?.archivedAt).toBe(ARCHIVED_AT);
+    // 同作品里的其它会话原样保留。
+    expect(next.items.find((item) => item.id === "session-a2")?.archivedAt).toBeUndefined();
+
+    // 没有任何写入落到 wB。
+    expect(
+      setQueryData.mock.calls.some(
+        ([key]) => JSON.stringify(key) === JSON.stringify(workKeys.sessions("wB")),
+      ),
+    ).toBe(false);
+    const keys = invalidate.mock.calls.map(([filters]) => (filters as { queryKey: unknown }).queryKey);
+    expect(keys).toContainEqual(workKeys.sessions("wA"));
+    expect(keys).not.toContainEqual(workKeys.sessions("wB"));
+  });
+
+  it("A→B→A：切回原作品后，上一代 archive 的结果也只写原作品缓存且恰好一次", async () => {
+    mocks.sessionsList.mockImplementation((workId: string) =>
+      Promise.resolve({ items: workId === "wA" ? [sessionA] : [sessionB] }),
+    );
+    const pending = deferred<NovelSession>();
+    mocks.sessionsArchive.mockReturnValue(pending.promise);
+    const { client, wrapper } = harness();
+    const setQueryData = vi.spyOn(client, "setQueryData");
+
+    const { result, rerender } = renderHook(({ workId }: { workId: string }) => useSessions(workId), {
+      wrapper,
+      initialProps: { workId: "wA" },
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    let archivePromise!: Promise<NovelSession>;
+    act(() => {
+      archivePromise = result.current.archive("session-a", true);
+    });
+
+    rerender({ workId: "wB" });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    rerender({ workId: "wA" });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      pending.resolve({ ...sessionA, archivedAt: ARCHIVED_AT });
+      await archivePromise;
+    });
+
+    const writesToA = setQueryData.mock.calls.filter(
+      ([key]) => JSON.stringify(key) === JSON.stringify(workKeys.sessions("wA")),
+    );
+    expect(writesToA).toHaveLength(1);
+    expect(
+      setQueryData.mock.calls.some(
+        ([key]) => JSON.stringify(key) === JSON.stringify(workKeys.sessions("wB")),
+      ),
+    ).toBe(false);
+  });
+
+  it("同作品归档：服务端返回的 archivedAt 留在列表里，且不影响相邻会话", async () => {
+    let archived = false;
+    mocks.sessionsList.mockImplementation((workId: string) =>
+      Promise.resolve({ items: workId === "wA" ? (archived ? [{ ...sessionA, archivedAt: ARCHIVED_AT }, sessionA2] : [sessionA, sessionA2]) : [] }),
+    );
+    mocks.sessionsArchive.mockImplementation(async () => {
+      archived = true;
+      return { ...sessionA, archivedAt: ARCHIVED_AT };
+    });
+    const { client, wrapper } = harness();
+
+    const { result } = renderHook(({ workId }: { workId: string }) => useSessions(workId), {
+      wrapper,
+      initialProps: { workId: "wA" },
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    let returned!: NovelSession;
+    await act(async () => {
+      returned = await result.current.archive("session-a", true);
+    });
+
+    expect(returned.archivedAt).toBe(ARCHIVED_AT);
+    const items = client.getQueryData<{ items: NovelSession[] }>(workKeys.sessions("wA"))?.items ?? [];
+    expect(items.find((item) => item.id === "session-a")?.archivedAt).toBe(ARCHIVED_AT);
+    expect(items.find((item) => item.id === "session-a2")?.archivedAt).toBeUndefined();
+    // 归档是展示元数据：status 不变，仍然可以恢复。
+    expect(items.find((item) => item.id === "session-a")?.status).toBe("active");
+  });
+
+  it("晚到 archive 失败：不写任何作品缓存、不失效任何会话列表，并暴露可读错误", async () => {
+    mocks.sessionsList.mockImplementation((workId: string) =>
+      Promise.resolve({ items: workId === "wA" ? [sessionA] : [sessionB] }),
+    );
+    const pending = deferred<NovelSession>();
+    mocks.sessionsArchive.mockReturnValue(pending.promise);
+    const { client, wrapper } = harness();
+    const setQueryData = vi.spyOn(client, "setQueryData");
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    const { result, rerender } = renderHook(({ workId }: { workId: string }) => useSessions(workId), {
+      wrapper,
+      initialProps: { workId: "wA" },
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    let archivePromise!: Promise<NovelSession>;
+    act(() => {
+      archivePromise = result.current.archive("session-a", true);
+    });
+    rerender({ workId: "wB" });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      pending.reject(new Error("归档失败"));
+      await expect(archivePromise).rejects.toThrow("归档失败");
+    });
+
+    const sessionWrites = setQueryData.mock.calls.filter(([key]) =>
+      JSON.stringify(key) === JSON.stringify(workKeys.sessions("wA")) ||
+      JSON.stringify(key) === JSON.stringify(workKeys.sessions("wB")),
+    );
+    expect(sessionWrites).toHaveLength(0);
+    const keys = invalidate.mock.calls.map(([filters]) => (filters as { queryKey: unknown }).queryKey);
+    expect(keys).not.toContainEqual(workKeys.sessions("wA"));
+    expect(keys).not.toContainEqual(workKeys.sessions("wB"));
+    await waitFor(() => expect(result.current.archiveError).toBe("归档失败"));
   });
 });

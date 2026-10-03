@@ -3,18 +3,22 @@
  *
  * 覆盖：
  *   - 真实 GUI 开发登录（auth mode 必须为 development）；
- *   - 通过 UI 新建独立作品与两个章节 A/B（A 保存 v1 正文，B 保持空 v0）；
+ *   - 通过 UI 新建独立作品（书架 → 新建书本 → 书名/简介 → 创建并开始写作）与两个章节 A/B
+ *     （A 保存 v1 正文，B 保持空 v0；有章节时“新建章节”表单先展开）；
  *   - 展开折叠的“章节助手上下文（查看与复制）”：只读、只含作品/章节 ID + 标题 + 脏提示，
  *     正文绝不进入上下文；dirty 随未保存草稿显隐；切 B 再切 A 后 ID/标题/复制提示均无残留；
  *   - 用户点击“复制章节上下文”：若浏览器支持并显示成功，回读本次剪贴板且**仅当**
  *     与可见 textarea 严格相等时才使用；否则走组件提示的手动选中路径并如实记 manual，
  *     绝不把未知剪贴板内容发给模型或写进报告；
  *   - 最终 prompt 只由当前 A 的可见上下文文本 + 唯一目标正文 marker 组成（不从 HTTP 隐式注入 ID）；
+ *   - 统一创作 Agent（无 preset grid）：首条消息直接写进“消息输入”，点“发送消息”才新建
+ *     novel-assistant 会话；用请求顺序证据断言 create-session → subscribe-events → send-message，
+ *     消息 URL 的 sessionId 在点击前未知，因此按 UUID 形状等待；
  *   - 真实 Cell + Responses 模型经 GUI 发送：持久带 seq 用户回显恰好一条且无 pending 副本、
  *     持久 completed 终态、非空持久 assistant、get_chapter 与 save_chapter_draft 工具记录；
  *   - 公共 HTTP 独立确认 A 正文精确、版本推进 + 历史、B 文本/版本不变；
  *   - 干净编辑器自动采用服务端新正文/版本且无未保存标记，chapterA GET 刷新 1..3 次有界；
- *   - UI 撤销 204，随后公共 HTTP 发消息 410（CSRF 只从 auth/session 取到内存）。
+ *   - UI“永久结束对话”204，随后公共 HTTP 发消息 410（CSRF 只从 auth/session 取到内存）。
  *
  * 边界：不读 .env/vendor、不直连 SQL、不 mock 路由或模型、不降低限流、不用 chat/completions、
  * 不把 cookie/CSRF/凭证/私钥写进报告；失败时如实保存 report 并非零退出。
@@ -28,6 +32,12 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const origin = process.env.MYRIX_ACCEPTANCE_ORIGIN ?? 'http://127.0.0.1:8787';
 const api = `${origin}/api/v1`;
+
+/**
+ * 统一创作 Agent 没有 preset grid：会话在**首条消息发送**时创建，因此 messages 的
+ * sessionId 在点击前未知，只能按 UUID 形状等待（绝不先 await 创建再点发送）。
+ */
+const SESSION_MESSAGE_PATH = /^\/api\/v1\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/messages$/i;
 
 // ---------------------------------------------------------------------------
 // 预检：显式 opt-in 与目标 origin 必须在**任何网络 / 建目录 / 浏览器之前**判定。
@@ -59,6 +69,7 @@ const report = {
   modelRound: null,
   clipboard: null,
   chapterAGetsDuringTurn: null,
+  requestOrder: null,
   requestCount: null,
   launchError: null,
   screenshots: [],
@@ -66,6 +77,7 @@ const report = {
     '只覆盖本地开发栈的开发登录、章节助手上下文面板与一次真实模型回合；不代表生产 OIDC/多租户行为。',
     '报告只记录测试 fixture 标识、公开事件摘要与必要截图，不含 cookie / CSRF / 令牌 / 正文草稿内容。',
     '剪贴板若被环境拒绝，则如实记录 manual 模式（使用可见 textarea 文本），不声称剪贴板回读成功。',
+    '统一创作 Agent 没有 preset 选择：会话在首条消息发送时创建为 novel-assistant，因此“等 active 再发送”改由请求顺序证据（create-session → subscribe-events → send-message）与历史对话里的服务端状态共同断言。',
   ],
   passed: false,
 };
@@ -120,9 +132,43 @@ function chapterEditor(page, title) {
   return page.getByLabel(`章节正文：${title}`).locator('[contenteditable="true"]');
 }
 
-async function selectChapter(page, title) {
-  await page.locator('.workspace-column button.item').filter({ hasText: title }).click();
-  await page.getByLabel(`章节正文：${title}`).waitFor();
+/** 登录后的唯一入口是书架（`<main aria-label="我的书架">`）。 */
+function shelfOf(page) {
+  return page.getByRole('main', { name: '我的书架', exact: true });
+}
+
+/**
+ * 章节新建表单在有章节时默认收起；展开态只渲染提交按钮、收起态只渲染同名开关，
+ * 因此“新建章节”在两种状态下都唯一。先看标题输入框在不在，不在就先点开。
+ */
+async function openChapterCreateForm(page) {
+  const input = page.getByLabel('新章节标题', { exact: true });
+  if (!(await input.isVisible().catch(() => false))) {
+    await page.getByRole('button', { name: '新建章节', exact: true }).click();
+  }
+  await input.waitFor();
+  return input;
+}
+
+/**
+ * 章节目录：左栏 `nav.book-nav` 里名为“章节”的具名 region（`<section aria-label="章节">`）。
+ * 设定条目也在同一目录里，因此章节选择必须限定在章节 region 内，避免同名条目串台。
+ */
+function selectChapter(page, title) {
+  return page
+    .getByRole('region', { name: '章节', exact: true })
+    .getByRole('button')
+    .filter({ hasText: title })
+    .first()
+    .click()
+    .then(() => page.getByLabel(`章节正文：${title}`).waitFor());
+}
+
+/** 历史对话面板默认收起；会话条目（标题 + 序号 + 时间）只在这里出现。 */
+async function openHistoryPanel(page) {
+  const toggle = page.getByRole('button', { name: '历史对话', exact: true });
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  await page.locator('.conversation-history').waitFor();
 }
 
 async function screenshot(page, name) {
@@ -144,6 +190,8 @@ let workId = null;
 let chapterA = null;
 let chapterB = null;
 let sessionId = null;
+/** 本节流请求的公开顺序（只存固定标签，不存 URL/正文）。 */
+const requestOrder = [];
 
 try {
   // 只有预检全部通过、目录已建并 opt-in 后，才加载 Playwright 与启动浏览器。
@@ -176,32 +224,40 @@ try {
   page.on('pageerror', () => errors.push('Uncaught browser application error'));
   page.on('request', request => {
     if (request.url().startsWith(api)) browserApiRequests += 1;
+    // 统一 Agent 的发送顺序证据：create-session → subscribe-events → send-message。
+    // 只记录形状匹配的公开路径，不记录任何正文/查询串。
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === 'POST' && workId && pathname === `/api/v1/works/${workId}/sessions`) requestOrder.push('create-session');
+    if (request.method() === 'GET' && /^\/api\/v1\/sessions\/[0-9a-f-]{36}\/events$/.test(pathname)) requestOrder.push('subscribe-events');
+    if (request.method() === 'POST' && SESSION_MESSAGE_PATH.test(pathname)) requestOrder.push('send-message');
   });
 
   await page.goto(origin, { waitUntil: 'domcontentloaded' });
   await page.getByRole('button', { name: '作者 author', exact: true }).click();
-  await page.getByRole('region', { name: '作品列表', exact: true }).waitFor();
+  await shelfOf(page).waitFor();
   const sessionResponse = await apiGet('/auth/session');
   assert.equal(sessionResponse.status(), 200, 'Real GUI development login must establish an opaque server session');
   assert.equal((await sessionResponse.json()).mode, 'development', 'Refusing to continue without development auth mode');
   report.checks.push('真实 GUI 开发登录成功；auth/session 明确为 development（cookie/CSRF 只存内存）');
 
-  // 2) 通过 UI 新建独立作品。
-  const list = page.getByRole('region', { name: '作品列表', exact: true });
-  await list.getByLabel('标题', { exact: true }).fill(workTitle);
-  await list.getByLabel('简介', { exact: true }).fill('章节助手上下文独立验收 fixture；保留供人工检查，不删除。');
+  // 2) 通过 UI 新建独立作品：书架 → 新建书本 → dialog（书名 + 简介，简介 label 含“选填”）→ 创建并开始写作 → 直接进入 studio。
+  await shelfOf(page).getByRole('button', { name: '新建书本', exact: true }).click();
+  const createDialog = page.getByRole('dialog');
+  await createDialog.getByLabel('书名', { exact: true }).fill(workTitle);
+  await createDialog.getByLabel('简介').fill('章节助手上下文独立验收 fixture；保留供人工检查，不删除。');
   const createdWork = page.waitForResponse(response => response.url() === `${api}/works` && response.request().method() === 'POST');
-  await list.getByRole('button', { name: '创建作品', exact: true }).click();
+  await createDialog.getByRole('button', { name: '创建并开始写作', exact: true }).click();
   const workResponse = await createdWork;
   assert.equal(workResponse.status(), 201);
   workId = (await workResponse.json()).id;
   assert.match(workId, /^[a-f0-9-]{36}$/);
   report.fixtures.work = { id: workId, title: workTitle };
-  report.checks.push('通过真实 UI 新建独立作品');
+  report.checks.push('通过真实 UI 新建独立作品并进入书内 studio');
 
-  // 3) 章节 A：UI 新建并保存 v1 正文。
-  await page.getByRole('tab', { name: '章节', exact: true }).click();
-  await page.getByLabel('新章节标题').fill(chapterATitle);
+  // 3) 章节 A：UI 新建并保存 v1 正文（无章节时新建表单默认展开）。
+  await page.getByRole('button', { name: '章节', exact: true }).click();
+  const chapterAInput = await openChapterCreateForm(page);
+  await chapterAInput.fill(chapterATitle);
   const createdChapterA = page.waitForResponse(response => response.url() === `${api}/works/${workId}/chapters` && response.request().method() === 'POST');
   await page.getByRole('button', { name: '新建章节', exact: true }).click();
   const chapterAResponse = await createdChapterA;
@@ -299,7 +355,9 @@ try {
   );
 
   // 7) 切 B 再切 A：上下文准确更新，旧 ID 与复制提示均无残留。
-  await page.getByLabel('新章节标题').fill(chapterBTitle);
+  //    A 之后已有章节，B 的新建表单默认收起，必须先点开同名开关再填标题、点提交。
+  const chapterBInput = await openChapterCreateForm(page);
+  await chapterBInput.fill(chapterBTitle);
   const createdChapterB = page.waitForResponse(response => response.url() === `${api}/works/${workId}/chapters` && response.request().method() === 'POST');
   await page.getByRole('button', { name: '新建章节', exact: true }).click();
   const chapterBResponse = await createdChapterB;
@@ -330,6 +388,8 @@ try {
   report.checks.push('切 B 再切 A 后上下文 ID/标题准确更新，无旧 ID、无旧复制提示残留；A 显示已保存 v1 正文且仍为干净状态');
 
   // 8) 真实模型回合：prompt 只由当前 A 的可见上下文文本 + 唯一目标正文 marker 组成。
+  //    统一创作 Agent 没有 preset grid：首条消息直接写进“消息输入”，点“发送消息”才会
+  //    新建 novel-assistant 会话，并等事件流真正连上后再投递消息。
   assert.equal(aContext, capturedContext, 'After returning to A, the visible context must still match the explicitly copied/selected context');
   const targetText = `A-TARGET-BODY-${randomUUID()}`;
   const prompt = [
@@ -341,29 +401,6 @@ try {
   ].join('\n');
   report.fixtures.targetMarker = targetText;
 
-  await page.getByTestId('preset-option').filter({ hasText: '章节写作' }).click();
-  const createdSession = page.waitForResponse(response => response.url() === `${api}/works/${workId}/sessions` && response.request().method() === 'POST');
-  await page.getByRole('button', { name: '新建会话（章节写作）', exact: true }).click();
-  const sessionCreateResponse = await createdSession;
-  assert.equal(sessionCreateResponse.status(), 201);
-  const created = await sessionCreateResponse.json();
-  assert.equal(created.preset, 'novel-chapter');
-  sessionId = created.id;
-  report.fixtures.session = { id: sessionId, preset: created.preset };
-
-  // 会话卡离开“创建中”= 事件流订阅成功 = 服务端绑定已 active（真实证据，不是猜测）。
-  const sessionActive = await page
-    .waitForFunction(
-      () =>
-        [...document.querySelectorAll('[aria-label="创作助手"] .list .item')].some(item =>
-          (item.querySelector('.item-sub')?.textContent ?? '').includes('活跃'),
-        ),
-      undefined,
-      { timeout: 60_000, polling: 250 },
-    )
-    .then(() => true, () => false);
-  assert.ok(sessionActive, 'The session card must leave "创建中" before the turn is sent (server-observed active binding)');
-
   await page.getByLabel('消息输入', { exact: true }).fill(prompt);
 
   // 只统计本轮触发的 chapterA GET（精确匹配，排除 /versions）：刷新必须有界。
@@ -373,11 +410,46 @@ try {
   };
   page.on('response', countChapterAGet);
 
-  const queued = page.waitForResponse(response => response.url() === `${api}/sessions/${sessionId}/messages` && response.request().method() === 'POST');
-  await page.getByRole('button', { name: '提交', exact: true }).click();
+  // 会话 id 在点击前未知：messages 的 URL 只能用 UUID 形状等待；
+  // create 与 send 两个 waiter 都必须在 click 之前建立，绝不先 await 创建再点发送。
+  const createdSession = page.waitForResponse(response => response.url() === `${api}/works/${workId}/sessions` && response.request().method() === 'POST', { timeout: 60_000 });
+  const queued = page.waitForResponse(response => response.request().method() === 'POST' && SESSION_MESSAGE_PATH.test(new URL(response.url()).pathname), { timeout: 60_000 });
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  const sessionCreateResponse = await createdSession;
+  assert.equal(sessionCreateResponse.status(), 201);
+  const created = await sessionCreateResponse.json();
+  assert.equal(created.preset, 'novel-assistant', 'The unified Agent session must be created as novel-assistant');
+  sessionId = created.id;
+  assert.match(sessionId, /^[a-f0-9-]{36}$/);
+  report.fixtures.session = { id: sessionId, preset: created.preset };
+
   const queuedResponse = await queued;
   assert.equal(queuedResponse.status(), 202, 'The BFF must accept the queued command');
   assert.match((await queuedResponse.json()).commandId, /^[0-9a-f-]{36}$/);
+
+  // 统一 Agent 的发送顺序是真实证据：先建会话、再订阅事件流、连上后才投递消息。
+  const firstIndex = kind => requestOrder.indexOf(kind);
+  assert.ok(
+    firstIndex('create-session') !== -1 &&
+      firstIndex('subscribe-events') > firstIndex('create-session') &&
+      firstIndex('send-message') > firstIndex('subscribe-events'),
+    `The first message must be sent only after the created session's event stream connected: ${JSON.stringify(requestOrder)}`,
+  );
+  report.requestOrder = requestOrder;
+
+  // 会话卡离开“创建中”= 事件流订阅成功 = 服务端绑定已 active（历史对话面板默认收起）。
+  await openHistoryPanel(page);
+  const sessionActive = await page
+    .waitForFunction(
+      () =>
+        [...document.querySelectorAll('.conversation-history .item .item-sub')].some(item =>
+          (item.textContent ?? '').includes('活跃'),
+        ),
+      undefined,
+      { timeout: 60_000, polling: 250 },
+    )
+    .then(() => true, () => false);
+  assert.ok(sessionActive, 'The session card must leave "创建中" once the stream is live (server-observed active binding)');
 
   // 只认带 data-seq 的持久用户回显；不断言瞬态 none 窗口（快速模型可能跳过它）。
   await page
@@ -512,11 +584,12 @@ try {
   report.checks.push('公共 HTTP 独立确认：A 正文精确等于 marker、版本 +1、历史含 v1 与新版本；B 文本/版本不变');
 
   // 10) 干净编辑器自动采用服务端新正文/版本，且本轮 chapterA GET 有界（1..3）。
-  const editorText = () => page.evaluate(() => document.querySelector('.workspace-column .editor [aria-label^="章节正文"] [contenteditable="true"]')?.innerText ?? null);
+  //     中栏是 `section[aria-label="作品内容"]`，不再有旧的 `.workspace-column` 包装层。
+  const editorText = () => page.evaluate(() => document.querySelector('[aria-label="作品内容"] [aria-label^="章节正文"] [contenteditable="true"]')?.innerText ?? null);
   const editorAdopted = await page
     .waitForFunction(
       expected => {
-        const shown = document.querySelector('.workspace-column .editor [contenteditable="true"]')?.innerText ?? null;
+        const shown = document.querySelector('[aria-label="作品内容"] [aria-label^="章节正文"] [contenteditable="true"]')?.innerText ?? null;
         if (shown === null) return false;
         const normalize = value => value.replace(/\n+$/, '');
         return normalize(shown) === normalize(expected);
@@ -528,7 +601,7 @@ try {
   if (!editorAdopted) {
     throw new Error(`Clean chapter editor did not adopt the server body after the durable tool write: ${JSON.stringify(await editorText())}`);
   }
-  const shownToolbar = await page.evaluate(() => document.querySelector('.workspace-column .editor .toolbar .small.muted')?.textContent ?? '');
+  const shownToolbar = await page.evaluate(() => document.querySelector('[aria-label="作品内容"] .editor .toolbar .small.muted')?.textContent ?? '');
   assert.ok(shownToolbar.includes(`已保存版本 ${chapterAfterJson.version}`), `Editor must show the server version: ${JSON.stringify(shownToolbar)}`);
   assert.ok(!shownToolbar.includes('有未保存修改'), `A clean editor that adopted server text must not be dirty: ${JSON.stringify(shownToolbar)}`);
   page.off('response', countChapterAGet);
@@ -537,9 +610,10 @@ try {
   assert.ok(chapterAGets <= 3, `Chapter A refresh must stay bounded per turn, got ${chapterAGets} GETs`);
   report.checks.push(`持久终态后干净编辑器自动显示服务端正文 v${chapterAfterJson.version} 且无未保存标记；本轮 chapterA GET ${chapterAGets} 次（1..3 有界，不含 versions）`);
 
+  await openHistoryPanel(page);
   const sessionStillActive = await page.evaluate(() =>
-    [...document.querySelectorAll('[aria-label="创作助手"] .list .item')].some(item =>
-      (item.querySelector('.item-sub')?.textContent ?? '').includes('活跃'),
+    [...document.querySelectorAll('.conversation-history .item .item-sub')].some(item =>
+      (item.textContent ?? '').includes('活跃'),
     ),
   );
   assert.ok(sessionStillActive, 'The session card must still report the server-observed active binding after the turn');
@@ -547,9 +621,13 @@ try {
   // 断言完成后再截图（model 回合后：编辑器与上下文一致）。
   await screenshot(page, 'model-roundtrip');
 
-  // 11) UI 撤销会话 204；随后公共 HTTP 发消息必须 410。
+  // 11) UI“永久结束对话”→ DELETE 204；随后公共 HTTP 发消息必须 410。
+  //     会话操作默认收起，且永久结束带 window.confirm，必须先展开再确认。
+  const sessionOptions = page.locator('.session-options');
+  if (!(await sessionOptions.evaluate(node => node.open))) await sessionOptions.locator('summary').click();
+  page.once('dialog', dialog => dialog.accept());
   const revoked = page.waitForResponse(response => response.url() === `${api}/sessions/${sessionId}` && response.request().method() === 'DELETE');
-  await page.getByRole('button', { name: '撤销会话', exact: true }).click();
+  await page.getByRole('button', { name: '永久结束对话', exact: true }).click();
   assert.equal((await revoked).status(), 204, 'UI session revocation must be accepted by the real BFF');
 
   const authSession = await apiGet('/auth/session');
@@ -562,7 +640,7 @@ try {
     data: { commandId: randomUUID(), text: '撤销后不得再投递' },
   });
   assert.equal(denied.status(), 410, 'A revoked session must reject new messages with 410');
-  report.checks.push('GUI 撤销会话返回 204；随后公共 HTTP（CSRF 仅内存）发消息得到 410');
+  report.checks.push('GUI“永久结束对话”返回 204；随后公共 HTTP（CSRF 仅内存）发消息得到 410');
   await screenshot(page, 'after-revocations');
 
   // 12) 整套请求数保持在一个 120/min 窗口以内。
@@ -578,8 +656,13 @@ try {
   process.exitCode = 1;
 } finally {
   // 尽力通过 GUI 正常登出；绝不读取/记录任何令牌。浏览器无论如何都会关闭。
+  // 账户菜单（含“退出登录”）在顶栏默认收起，先展开再点。
   try {
     if (mainPage && !mainPage.isClosed()) {
+      const accountMenu = mainPage.locator('.account-menu');
+      if ((await accountMenu.count()) > 0 && !(await accountMenu.evaluate(node => node.open))) {
+        await accountMenu.locator('summary').click({ timeout: 3000 }).catch(() => undefined);
+      }
       const logout = mainPage.getByRole('button', { name: '退出登录', exact: true });
       if (await logout.isVisible().catch(() => false)) {
         await logout.click({ timeout: 3000 }).catch(() => undefined);

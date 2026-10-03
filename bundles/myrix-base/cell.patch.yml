@@ -30,14 +30,17 @@
 #   myrix-binding-lease  the only producer of principals liveness AND policy
 #   myrix-runtime-driver POST /v1/commands + SSE, revocation, drain
 #   myrix-llm-gateway    model route: every call goes through the gateway
-#   myrix-novel          the novel vertical: `ctx.novelStore` + 3 preset subtrees
+#   myrix-novel          the novel vertical: `ctx.novelStore` + 4 preset subtrees
 #   cell-route-seam      TEST-ONLY route declaration (see below)
 #   cell-probe           TEST-ONLY self-check (see below)
 #
 # NOTE ON `myrix-novel`
 #   It is a production row, not an optional extra: without it there is no
-#   `ctx.novelStore` and no `novel-outline` / `novel-chapter` / `novel-bible`
-#   preset, so a Cell has no business tools at all. The tools live only inside
+#   `ctx.novelStore` and no preset, so a Cell has no business tools at all.
+#   The presets are `novel-assistant` (the unified assistant: all six novel
+#   tools in one scope) plus the three historical restricted presets
+#   `novel-outline` / `novel-chapter` / `novel-bible`, whose masks are kept
+#   unchanged so replayed history never gains a tool. The tools live only inside
 #   those presets' scopes (`@myrix/novel/preset-tools` rows registered by the
 #   plugin itself); a preset's Agent sees its own intersection and the root
 #   scope sees none of them.

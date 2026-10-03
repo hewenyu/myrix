@@ -5,11 +5,15 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
+import { openBook, shelfOf, verifyBusinessEditing } from './business-journey.mjs';
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const origin = process.env.MYRIX_ACCEPTANCE_ORIGIN ?? 'http://127.0.0.1:8787';
 assert.equal(origin, 'http://127.0.0.1:8787', 'This acceptance runner only targets the explicitly provisioned local Myrix stack');
 const api = `${origin}/api/v1`;
 const withModel = process.env.MYRIX_ACCEPTANCE_MODEL === '1';
+/** 统一 Agent 没有 preset 选择；会话在首条消息发送时创建，因此 messages 的 sessionId 只能按 UUID 形状等待。 */
+const SESSION_MESSAGE_PATH = /^\/api\/v1\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/messages$/i;
 const run = `browser-${Date.now()}`;
 const directory = resolve(root, 'data/acceptance', run);
 await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -27,7 +31,7 @@ async function login(user, label) {
   page.on('pageerror', () => errors.push('Uncaught browser application error'));
   await page.goto(origin, { waitUntil: 'domcontentloaded' });
   await page.getByRole('button', { name: label, exact: true }).click();
-  await page.getByRole('region', { name: '作品列表', exact: true }).waitFor();
+  await shelfOf(page).waitFor();
   const session = await context.request.get(`${api}/auth/session`);
   assert.equal(session.status(), 200, `Login failed for ${user}`);
   assert.equal((await session.json()).mode, 'development');
@@ -46,17 +50,19 @@ try {
   mainPage = page;
   result.checks.push('Real browser development login and opaque server session');
   const title = `浏览器验收-${run}`;
-  const list = page.getByRole('region', { name: '作品列表', exact: true });
-  await list.getByLabel('标题', { exact: true }).fill(title);
-  await list.getByLabel('简介', { exact: true }).fill('独立验收作品；保留供人工检查。');
+  // 登录后唯一入口是书架：新建书本 → dialog（书名 + 简介，简介 label 含“选填”）→ 创建并开始写作 → 直接进入书内 studio。
+  await shelfOf(page).getByRole('button', { name: '新建书本', exact: true }).click();
+  const createDialog = page.getByRole('dialog');
+  await createDialog.getByLabel('书名', { exact: true }).fill(title);
+  await createDialog.getByLabel('简介').fill('独立验收作品；保留供人工检查。');
   const created = page.waitForResponse(response => response.url() === `${api}/works` && response.request().method() === 'POST');
-  await list.getByRole('button', { name: '创建作品', exact: true }).click();
+  await createDialog.getByRole('button', { name: '创建并开始写作', exact: true }).click();
   const createResponse = await created;
   assert.equal(createResponse.status(), 201);
   result.workId = (await createResponse.json()).id;
   assert.match(result.workId, /^[a-f0-9-]{36}$/);
   const outlineUrl = `${api}/works/${result.workId}/outline`;
-  await page.getByRole('tab', { name: '大纲', exact: true }).click();
+  await page.getByRole('button', { name: '大纲', exact: true }).click();
   const editor = page.getByLabel('作品大纲', { exact: true }).locator('[contenteditable="true"]');
   const text = `验收大纲 ${run}。灯塔守护者在风暴中寻找失踪的航船。`;
   await editor.fill(text);
@@ -66,13 +72,13 @@ try {
   const persisted = await context.request.get(outlineUrl);
   assert.equal((await persisted.json()).text, text);
   result.checks.push('Create work and save plain-text outline through UI into the real BFF');
+  // 刷新后回到书架（书内选择不持久化），再显式打开书本。
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await list.getByRole('button').filter({ hasText: title }).click();
-  await page.getByRole('tab', { name: '大纲', exact: true }).click();
+  await openBook(page, title);
+  await page.getByRole('button', { name: '大纲', exact: true }).click();
   await editor.waitFor();
   assert.equal(await editor.innerText(), text);
   result.checks.push('Reload preserves the authenticated session and stored outline');
-  const { verifyBusinessEditing } = await import('./business-journey.mjs');
   await verifyBusinessEditing({ page, context, workId: result.workId, title, text, run, api, login, checks: result.checks });
 
   for (const [user, label] of [['editor', '编辑 editor'], ['other-tenant', '其它租户 other-tenant']]) {
@@ -90,12 +96,6 @@ try {
   }
 
   if (withModel) {
-    await page.getByTestId('preset-option').filter({ hasText: '大纲助手' }).click();
-    const sessionCreated = page.waitForResponse(response => response.url() === `${api}/works/${result.workId}/sessions` && response.request().method() === 'POST');
-    await page.getByRole('button', { name: '新建会话（大纲助手）', exact: true }).click();
-    const sessionResponse = await sessionCreated;
-    assert.equal(sessionResponse.status(), 201);
-    result.sessionId = (await sessionResponse.json()).id;
     const marker = `模型工具落库-${run}`;
     const targetText = `${marker}：灯塔守护者救回了失踪的航船。`;
     const commandText = `请调用 get_outline 读取当前作品大纲及版本，再调用 update_outline 将大纲完整替换为“${targetText}”。必须实际保存到作品，不能只在回复中给草稿。不要调用其他工具，保存后简短确认。`;
@@ -109,8 +109,19 @@ try {
     };
     page.on('response', countOutlineGet);
 
-    const queued = page.waitForResponse(response => response.url() === `${api}/sessions/${result.sessionId}/messages` && response.request().method() === 'POST');
-    await page.getByRole('button', { name: '提交', exact: true }).click();
+    // 统一 Agent：没有 preset grid，首条消息直接进输入框；**发送按钮**才会新建
+    // novel-assistant 会话，并等事件流真正连上后再投递消息。
+    // 会话 id 在点击前未知，因此 messages 的 URL 只能用 UUID 形状等待；
+    // create 与 send 两个 waiter 都必须在 click 之前建立，绝不先 await 创建再点发送。
+    const sessionCreated = page.waitForResponse(response => response.url() === `${api}/works/${result.workId}/sessions` && response.request().method() === 'POST', { timeout: 60_000 });
+    const queued = page.waitForResponse(response => response.request().method() === 'POST' && SESSION_MESSAGE_PATH.test(new URL(response.url()).pathname), { timeout: 60_000 });
+    await page.getByRole('button', { name: '发送消息', exact: true }).click();
+    const sessionResponse = await sessionCreated;
+    assert.equal(sessionResponse.status(), 201);
+    const createdSession = await sessionResponse.json();
+    assert.equal(createdSession.preset, 'novel-assistant', 'The unified Agent session must be created as novel-assistant');
+    result.sessionId = createdSession.id;
+    assert.match(result.sessionId, /^[a-f0-9-]{36}$/);
     const queuedResponse = await queued;
     assert.equal(queuedResponse.status(), 202);
     const commandId = (await queuedResponse.json()).commandId;
@@ -265,10 +276,13 @@ try {
     assert.ok(outlineGets <= 3, `Refreshing must stay bounded per turn, got ${outlineGets} outline GETs`);
     result.checks.push(`Persisted turn-end refreshed the work outline exactly ${outlineGets} time(s); the clean editor then showed server text v${savedOutline.version} (never model reply text)`);
 
-    // 会话卡不能一直停在"创建中"：事件流能订阅成功本身就证明绑定已在服务端 active。
+    // 会话卡不能一直停在"创建中"：历史对话面板默认收起，先点开再读会话条目的服务端状态。
+    const historyToggle = page.getByRole('button', { name: '历史对话', exact: true });
+    if ((await historyToggle.getAttribute('aria-expanded')) !== 'true') await historyToggle.click();
+    await page.locator('.conversation-history').waitFor();
     const sessionShowsActive = await page.waitForFunction(
-      () => [...document.querySelectorAll('[aria-label="创作助手"] .list .item')]
-        .some(item => (item.querySelector('.item-sub')?.textContent ?? '').includes('活跃')),
+      () => [...document.querySelectorAll('.conversation-history .item .item-sub')]
+        .some(item => (item.textContent ?? '').includes('活跃')),
       undefined,
       { timeout: 20_000, polling: 250 },
     ).then(() => true, () => false);
@@ -279,8 +293,12 @@ try {
     await screenshot(page, 'model-tool-roundtrip');
     page.off('response', countOutlineGet);
 
+    // 会话操作默认收起：展开当前对话操作，确认“永久结束对话”的 window.confirm，再等 DELETE 204。
+    const sessionOptions = page.locator('.session-options');
+    if (!(await sessionOptions.evaluate(node => node.open))) await sessionOptions.locator('summary').click();
+    page.once('dialog', dialog => dialog.accept());
     const revoked = page.waitForResponse(response => response.url() === `${api}/sessions/${result.sessionId}` && response.request().method() === 'DELETE');
-    await page.getByRole('button', { name: '撤销会话', exact: true }).click();
+    await page.getByRole('button', { name: '永久结束对话', exact: true }).click();
     assert.equal((await revoked).status(), 204);
     result.checks.push('Browser session revocation accepted by the real BFF');
   }
