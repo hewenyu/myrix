@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { EmptyHint } from "../components/common";
 import { useDraft } from "../state/useDraft";
+import type { SelectionContext } from "../state/selectionContext";
 import { useBible, useChapter, useChapters, useOutline } from "../state/useWorkspace";
 import { BibleEditor } from "./BiblePanel";
 import { BookNavigation, type BookSection } from "./BookNavigation";
@@ -19,6 +20,8 @@ export interface WorkspacePaneProps {
    * 卸载时一定会回调 false：草稿随实例消失，顶层不应继续持有过期的 dirty。
    */
   onDirtyChange?: (dirty: boolean) => void;
+  onSelectionContextChange?: (context: SelectionContext | null) => void;
+  onNavigateContent?: () => void;
 }
 
 /**
@@ -39,7 +42,7 @@ function confirmDiscardChanges(reason: "dirty" | "saving"): boolean {
  * 左：书内目录 `BookNavigation`；中：`studio-main` 只显示所选内容。
  * 顶层 App 负责把它们放进三栏布局，并在“返回书架”时按 `onDirtyChange` 确认。
  */
-export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePaneProps) {
+export function WorkspacePane({ workId, workTitle, onDirtyChange, onSelectionContextChange, onNavigateContent }: WorkspacePaneProps) {
   const [section, setSection] = useState<BookSection>("outline");
   const [chapterId, setChapterId] = useState<string | null>(null);
   const [bibleEntryId, setBibleEntryId] = useState<string | null>(null);
@@ -78,6 +81,26 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
   });
 
   const dirty = outlineEditor.dirty || chapterEditor.dirty || bibleEditor.dirty;
+  const activeEditor = section === "outline" ? outlineEditor : section === "chapters" ? chapterEditor : bibleEditor;
+  const targetId = section === "outline" ? workId : section === "chapters" ? chapterId : bibleEntryId;
+  const targetTitle = section === "outline" ? "故事大纲" : section === "chapters"
+    ? chapterList.items.find((item) => item.id === chapterId)?.title ?? "当前章节"
+    : selectedBibleEntry?.title ?? bibleEditor.draft?.base?.title ?? "当前设定";
+  useLayoutEffect(() => {
+    onSelectionContextChange?.(workId && targetId ? {
+      kind: section === "chapters" ? "chapter" : section === "bible" ? "bible" : "outline",
+      workId, id: targetId, title: targetTitle, dirty: activeEditor.dirty,
+    } : null);
+  }, [workId, section, targetId, targetTitle, activeEditor.dirty, onSelectionContextChange]);
+  useEffect(() => {
+    const saveKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s" || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      if (activeEditor.dirty && !activeEditor.saving && !activeEditor.conflict) void activeEditor.save();
+    };
+    window.addEventListener("keydown", saveKey);
+    return () => window.removeEventListener("keydown", saveKey);
+  }, [activeEditor]);
 
   /** 最新的草稿状态：异步回包（新建章节/条目）必须按“此刻”判断，而不是发起时的闭包。 */
   const chapterDirtyRef = useRef(chapterEditor.dirty);
@@ -156,12 +179,14 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
     userSelectedRef.current = true;
     selectionTokenRef.current += 1;
     setSection(next);
+    onNavigateContent?.();
   }
 
   function selectOutline() {
     userSelectedRef.current = true;
     selectionTokenRef.current += 1;
     setSection("outline");
+    onNavigateContent?.();
   }
 
   function selectChapter(nextChapterId: string) {
@@ -169,6 +194,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
       userSelectedRef.current = true;
       selectionTokenRef.current += 1;
       setSection("chapters");
+      onNavigateContent?.();
       return;
     }
     // 换章节会重置章节草稿：有未保存内容时必须先确认。
@@ -181,6 +207,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
     selectionTokenRef.current += 1;
     setChapterId(nextChapterId);
     setSection("chapters");
+    onNavigateContent?.();
   }
 
   function selectBibleEntry(nextEntryId: string) {
@@ -188,6 +215,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
       userSelectedRef.current = true;
       selectionTokenRef.current += 1;
       setSection("bible");
+      onNavigateContent?.();
       return;
     }
     if (bibleSavingRef.current) {
@@ -199,6 +227,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
     selectionTokenRef.current += 1;
     setBibleEntryId(nextEntryId);
     setSection("bible");
+    onNavigateContent?.();
   }
 
   function createChapter(title: string) {
@@ -213,6 +242,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
         userSelectedRef.current = true;
         setChapterId(chapter.id);
         setSection("chapters");
+        onNavigateContent?.();
       },
       () => undefined, // 失败原因由 createError 承载并由目录展示
     );
@@ -230,6 +260,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
         setBibleQuery("");
         setBibleEntryId(entry.id);
         setSection("bible");
+        onNavigateContent?.();
       },
       () => undefined,
     );
@@ -254,13 +285,6 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
     );
   }
 
-  const currentLabel =
-    section === "outline"
-      ? "大纲"
-      : section === "chapters"
-        ? (chapterState.chapter?.title ?? "章节")
-        : (selectedBibleEntry?.title ?? "设定圣经");
-
   return (
     <>
       <BookNavigation
@@ -280,7 +304,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
           chapters: chapterList.items,
           isLoading: chapterList.isLoading,
           error: chapterList.error,
-          selectedChapterId: chapterId,
+          selectedChapterId: section === "chapters" ? chapterId : null,
           dirtyChapterId: chapterEditor.dirty ? chapterId : null,
           savingChapterId: chapterEditor.saving ? chapterId : null,
           onSelect: selectChapter,
@@ -295,7 +319,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
           items: bibleState.items,
           isLoading: bibleState.isLoading,
           error: bibleState.error,
-          selectedEntryId: bibleEntryId,
+          selectedEntryId: section === "bible" ? bibleEntryId : null,
           dirtyEntryId: bibleEditor.dirty ? bibleEntryId : null,
           savingEntryId: bibleEditor.saving ? bibleEntryId : null,
           onSelect: selectBibleEntry,
@@ -307,15 +331,7 @@ export function WorkspacePane({ workId, workTitle, onDirtyChange }: WorkspacePan
       />
 
       <section className="pane studio-main" aria-label="作品内容">
-        <header className="pane-header studio-main-header">
-          <span className="small muted">{workTitle ?? workId}</span>
-          <span className="small muted" aria-hidden="true">
-            ·
-          </span>
-          <span>{currentLabel}</span>
-          <span className="spacer" />
-          {dirty ? <span className="status-pill is-warn">有未保存修改</span> : null}
-        </header>
+        {dirty && !activeEditor.dirty ? <div className="other-draft-notice" role="status">其他文稿有未保存修改，切换分区不会丢失草稿。</div> : null}
 
         {section === "outline" ? (
           <OutlinePanel

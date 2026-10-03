@@ -1,16 +1,21 @@
 /**
- * 真实本地浏览器验收：章节助手上下文（ChapterAssistantContext）。
+ * 真实本地浏览器验收：自动“当前选中对象”目标（SelectionContext）。
  *
  * 覆盖：
  *   - 真实 GUI 开发登录（auth mode 必须为 development）；
  *   - 通过 UI 新建独立作品（书架 → 新建书本 → 书名/简介 → 创建并开始写作）与两个章节 A/B
  *     （A 保存 v1 正文，B 保持空 v0；有章节时“新建章节”表单先展开）；
- *   - 展开折叠的“章节助手上下文（查看与复制）”：只读、只含作品/章节 ID + 标题 + 脏提示，
- *     正文绝不进入上下文；dirty 随未保存草稿显隐；切 B 再切 A 后 ID/标题/复制提示均无残留；
- *   - 用户点击“复制章节上下文”：若浏览器支持并显示成功，回读本次剪贴板且**仅当**
- *     与可见 textarea 严格相等时才使用；否则走组件提示的手动选中路径并如实记 manual，
- *     绝不把未知剪贴板内容发给模型或写进报告；
- *   - 最终 prompt 只由当前 A 的可见上下文文本 + 唯一目标正文 marker 组成（不从 HTTP 隐式注入 ID）；
+ *   - 创作助手输入框上方的“当前修改目标”徽标自动显示当前选中章节标题（默认修改当前选中），
+ *     不再有折叠的“章节助手上下文（查看与复制）”只读 textarea 或“复制章节上下文”按钮；
+ *   - 章节正文采用阅读优先的 Manuscript：编辑器不在时先点“编辑原文”才进入可编辑态，
+ *     `getByLabel(..., { exact: true })` 只命中编辑器 label，不会命中 `…阅读` 的 article；
+ *   - 有未保存草稿时出现视觉 dirty 警告且目标仍指向当前章节，正文/草稿绝不进入徽标；
+ *   - 切 B 再切 A 后目标标题随选中准确更新，无旧标题、无旧脏警告残留；
+ *   - composer 只写自然语言指令（不含手动拼进去的 ID/标题）；真正发出的 payload 在内存中检查：
+ *     指令 + 追加的【当前选中对象】元数据恰好是 kind/workId/id/title/dirty 五个字段，
+ *     dirty=false，且不含已保存正文、未保存草稿或其他章节 ID（请求正文不落盘、不打印）；
+ *   - 消息 202 入队后的在途窗口把选中切到 B 再回 A：实时目标徽标跟随新选中，而此前发出的
+ *     payload 与带 seq 持久回显仍冻结在 A（不用路由 mock 冻结真实模型）；
  *   - 统一创作 Agent（无 preset grid）：首条消息直接写进“消息输入”，点“发送消息”才新建
  *     novel-assistant 会话；用请求顺序证据断言 create-session → subscribe-events → send-message，
  *     消息 URL 的 sessionId 在点击前未知，因此按 UUID 形状等待；
@@ -39,6 +44,9 @@ const api = `${origin}/api/v1`;
  */
 const SESSION_MESSAGE_PATH = /^\/api\/v1\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/messages$/i;
 
+/** `withSelectionContext` 追加元数据时使用的固定分隔（只在内存里解析，不打印正文）。 */
+const SELECTION_MARKER = '\n\n【当前选中对象】\n';
+
 // ---------------------------------------------------------------------------
 // 预检：显式 opt-in 与目标 origin 必须在**任何网络 / 建目录 / 浏览器之前**判定。
 // 这里刻意不静态 import playwright：拒绝路径不会加载任何浏览器代码。
@@ -61,22 +69,25 @@ assert.match(directory, new RegExp(`^${acceptanceRoot.replace(/[.*+?^${}()|[\]\\
 await mkdir(directory, { recursive: true, mode: 0o700 });
 
 const report = {
-  acceptance: 'chapter-context-browser (real browser UI + real model, public HTTP verification)',
+  acceptance: 'chapter-context-browser (automatic current-selection target + real browser UI + real model, public HTTP verification)',
   run,
   origin,
   checks: [],
   fixtures: {},
   modelRound: null,
-  clipboard: null,
+  targetCapture: null,
+  freezeProbe: null,
   chapterAGetsDuringTurn: null,
   requestOrder: null,
   requestCount: null,
   launchError: null,
   screenshots: [],
   limitations: [
-    '只覆盖本地开发栈的开发登录、章节助手上下文面板与一次真实模型回合；不代表生产 OIDC/多租户行为。',
-    '报告只记录测试 fixture 标识、公开事件摘要与必要截图，不含 cookie / CSRF / 令牌 / 正文草稿内容。',
-    '剪贴板若被环境拒绝，则如实记录 manual 模式（使用可见 textarea 文本），不声称剪贴板回读成功。',
+    '只覆盖本地开发栈的开发登录、自动“当前选中对象”目标与一次真实模型回合；不代表生产 OIDC/多租户行为。',
+    '报告只记录测试 fixture 标识、公开事件摘要、目标元数据（kind/workId/id/title/dirty 五个字段）与必要截图；不含 cookie / CSRF / 令牌 / 正文草稿内容，也不记录发出的请求正文。',
+    '界面已无手动复制/剪贴板上下文入口：当前目标由 UI 在发送时自动附加，因此本验收不再授予或验证任何剪贴板能力。',
+    '浏览器验收不用路由 mock：在消息 202 入队后的在途窗口把选中切到 B 再回 A，断言实时目标跟随选中、而已发出的 payload 与带 seq 持久回显仍冻结在 A；但“创建会话 / 订阅事件流那几帧里 UI 显示‘本条消息目标已锁定’徽标”这一帧级窗口由单元测试 apps/novel-web/tests/AssistantPanel.test.tsx 确定性覆盖，真实模型回合无法在不 mock 事件流的前提下稳定卡住它。',
+    'dirty=true 的元数据投影（有未保存草稿时只附布尔标记、绝不附带草稿正文）由 selectionContext / AssistantPanel 单元测试确定性覆盖；浏览器真实回合为保持可复现采用干净章节发送，只在 UI 上断言脏警告显隐。',
     '统一创作 Agent 没有 preset 选择：会话在首条消息发送时创建为 novel-assistant，因此“等 active 再发送”改由请求顺序证据（create-session → subscribe-events → send-message）与历史对话里的服务端状态共同断言。',
   ],
   passed: false,
@@ -93,43 +104,51 @@ async function apiGet(path) {
   return context.request.get(`${api}${path}`);
 }
 
-function contextDetails(page) {
-  return page
-    .locator('details')
-    .filter({ has: page.locator('summary', { hasText: '章节助手上下文（查看与复制）' }) })
-    .first();
+/** 读当前目标徽标 / dirty 警告的可见文本（只读文案，不含任何正文）。 */
+function readTarget(page) {
+  return page.evaluate(() => {
+    const chip = document.querySelector('.composer-target');
+    return {
+      caption: chip?.querySelector('.target-caption')?.textContent?.trim() ?? null,
+      title: chip?.querySelector('strong')?.textContent?.trim() ?? null,
+      warning: document.querySelector('.target-warning')?.textContent?.trim() ?? null,
+    };
+  });
 }
 
-/** 展开章节助手上下文并返回 textarea；折叠状态由 <details> 控制。 */
-async function openContext(page) {
-  const details = contextDetails(page);
-  await details.waitFor({ state: 'attached' });
-  if (!(await details.evaluate(element => element.open))) {
-    await details.locator('summary').click();
-  }
-  const textarea = details.getByLabel('章节助手上下文', { exact: true });
-  await textarea.waitFor({ state: 'visible' });
-  return { details, textarea };
-}
-
-/** 等待上下文文本满足包含/排除条件（React 状态更新是异步的）。 */
-async function waitForContext(page, includes, excludes = []) {
+/** 等待目标徽标显示指定标题（切换选中后 React 状态更新是异步的）。 */
+async function waitForTarget(page, title) {
   await page.waitForFunction(
-    ({ includes: must, excludes: mustNot }) => {
-      const details = [...document.querySelectorAll('details')].find(node =>
-        node.querySelector('summary')?.textContent?.includes('章节助手上下文（查看与复制）'),
-      );
-      const value = details?.querySelector('textarea[aria-label="章节助手上下文"]')?.value ?? null;
-      if (value === null) return false;
-      return must.every(item => value.includes(item)) && mustNot.every(item => !value.includes(item));
-    },
-    { includes, excludes },
+    (expected) => document.querySelector('.composer-target strong')?.textContent?.trim() === expected,
+    title,
     { timeout: 15_000, polling: 100 },
   );
 }
 
-function chapterEditor(page, title) {
-  return page.getByLabel(`章节正文：${title}`).locator('[contenteditable="true"]');
+/** 等待 dirty 警告出现（true）或消失（false）。 */
+async function waitForTargetWarning(page, present) {
+  await page.waitForFunction(
+    (expected) => Boolean(document.querySelector('.target-warning')) === expected,
+    present,
+    { timeout: 15_000, polling: 100 },
+  );
+}
+
+/**
+ * 阅读优先的 Manuscript：`editing` 初值 = `!value.trim() || dirty`，因此有已保存正文且干净的
+ * 章节默认是“阅读”态，中栏没有 contenteditable。这里只在编辑器缺席时点“编辑原文”，
+ * 并且 label 必须 exact——`章节正文：X阅读` 是阅读态 article 的 aria-label，前缀相同。
+ */
+async function openChapterEditor(page, title) {
+  await page.locator('.manuscript-heading h1').filter({ hasText: title }).first().waitFor({ state: 'visible' });
+  const surface = page.getByLabel(`章节正文：${title}`, { exact: true });
+  if ((await surface.count()) === 0) {
+    await page.getByRole('button', { name: '编辑原文', exact: true }).click();
+  }
+  await surface.waitFor({ state: 'visible' });
+  const editor = surface.locator('[contenteditable="true"]');
+  await editor.waitFor({ state: 'visible' });
+  return editor;
 }
 
 /** 登录后的唯一入口是书架（`<main aria-label="我的书架">`）。 */
@@ -153,15 +172,16 @@ async function openChapterCreateForm(page) {
 /**
  * 章节目录：左栏 `nav.book-nav` 里名为“章节”的具名 region（`<section aria-label="章节">`）。
  * 设定条目也在同一目录里，因此章节选择必须限定在章节 region 内，避免同名条目串台。
+ * 选中成功的证据用目标徽标标题（与阅读/编辑模式无关）。
  */
-function selectChapter(page, title) {
-  return page
+async function selectChapter(page, title) {
+  await page
     .getByRole('region', { name: '章节', exact: true })
     .getByRole('button')
     .filter({ hasText: title })
     .first()
-    .click()
-    .then(() => page.getByLabel(`章节正文：${title}`).waitFor());
+    .click();
+  await waitForTarget(page, title);
 }
 
 /** 历史对话面板默认收起；会话条目（标题 + 序号 + 时间）只在这里出现。 */
@@ -212,11 +232,10 @@ try {
   assert.equal(config.status, 200, 'Local development stack must be reachable');
   assert.equal((await config.json()).mode, 'development', 'Refusing to run against any non-development auth mode');
 
+  // 目标徽标由 UI 自动生成，不再需要任何剪贴板权限。
   context = await browser.newContext({
     viewport: { width: 1600, height: 1000 },
     locale: 'zh-CN',
-    // 真实浏览器权限授予（不是 mock）：用于验证“复制章节上下文”的剪贴板回读路径。
-    permissions: ['clipboard-read', 'clipboard-write'],
   });
   const page = await context.newPage();
   mainPage = page;
@@ -244,7 +263,7 @@ try {
   await shelfOf(page).getByRole('button', { name: '新建书本', exact: true }).click();
   const createDialog = page.getByRole('dialog');
   await createDialog.getByLabel('书名', { exact: true }).fill(workTitle);
-  await createDialog.getByLabel('简介').fill('章节助手上下文独立验收 fixture；保留供人工检查，不删除。');
+  await createDialog.getByLabel('简介').fill('自动当前选中目标独立验收 fixture；保留供人工检查，不删除。');
   const createdWork = page.waitForResponse(response => response.url() === `${api}/works` && response.request().method() === 'POST');
   await createDialog.getByRole('button', { name: '创建并开始写作', exact: true }).click();
   const workResponse = await createdWork;
@@ -264,8 +283,8 @@ try {
   assert.equal(chapterAResponse.status(), 201);
   chapterA = await chapterAResponse.json();
   assert.equal(chapterA.version, 0, 'A new chapter must start at version 0');
-  await chapterEditor(page, chapterATitle).waitFor();
-  await chapterEditor(page, chapterATitle).fill(savedBodyA);
+  const editorA = await openChapterEditor(page, chapterATitle);
+  await editorA.fill(savedBodyA);
   const savedChapterA = page.waitForResponse(response => response.url() === `${api}/works/${workId}/chapters/${chapterA.id}` && response.request().method() === 'PUT');
   await page.getByRole('button', { name: '保存', exact: true }).click();
   assert.equal((await savedChapterA).status(), 200);
@@ -277,84 +296,43 @@ try {
   report.fixtures.chapterA = { id: chapterA.id, title: chapterATitle, initialVersion: chapterA.version, savedVersion: persistedAJson.version };
   report.checks.push('通过真实 UI 新建章节 A 并保存已保存正文 v1（随后由公共 HTTP 独立确认）');
 
-  // 4) 展开上下文：只读、ID/标题正确、不含正文、dirty=无。
-  let { details, textarea } = await openContext(page);
-  assert.equal(await textarea.evaluate(element => element.readOnly), true, 'The context textarea must be readOnly');
-  let contextValue = await textarea.inputValue();
-  assert.match(contextValue, /【章节助手上下文】/);
-  assert.ok(contextValue.includes(`作品ID：${workId}`), 'Visible context must carry the real work id');
-  assert.ok(contextValue.includes(`章节ID：${chapterA.id}`), 'Visible context must carry the real chapter id');
-  assert.ok(contextValue.includes(`章节标题：${chapterATitle}`), 'Visible context must carry the chapter title');
-  assert.ok(!contextValue.includes(savedBodyA), 'Chapter body must never enter the assistant context');
-  assert.ok(contextValue.includes('未保存草稿：无'), 'A clean editor must report no unsaved draft');
-  const detailGroup = await details.locator('[role="group"]').innerText();
-  assert.ok(detailGroup.includes(workId) && detailGroup.includes(chapterA.id) && detailGroup.includes(chapterATitle));
-  report.checks.push('展开折叠面板：只读 textarea 含作品ID/章节ID/标题，明确不含正文，干净状态显示“未保存草稿：无”');
-
-  // 5) dirty 提示：有未保存文本时变“有”且不含草稿；恢复已保存文本后回到“无”。
-  await chapterEditor(page, chapterATitle).fill(`${savedBodyA}\n${draftLineA}`);
-  await waitForContext(page, ['未保存草稿：有'], [draftLineA]);
-  contextValue = await textarea.inputValue();
-  assert.ok(contextValue.includes('未保存草稿：有'));
-  assert.ok(!contextValue.includes(draftLineA), 'The unsaved draft text must not be copied into the context');
-  assert.ok(!contextValue.includes(savedBodyA), 'The saved body must not be copied into the context either');
-  await chapterEditor(page, chapterATitle).fill(savedBodyA);
-  await waitForContext(page, ['未保存草稿：无'], [draftLineA]);
-  report.checks.push('未保存草稿时 dirty 提示为“有”且上下文不含草稿/正文；恢复已保存文本后 dirty 回到“无”');
-
-  // 6) 复制动作由用户点击触发：仅当成功且回读与可见文本严格相等时才采用剪贴板内容。
-  await details.getByRole('button', { name: '复制章节上下文', exact: true }).click();
-  const status = details.getByRole('status');
-  await status.waitFor({ state: 'visible', timeout: 5000 });
-  const statusText = await status.innerText();
-  // 复制结果落定后重新读取**当前可见** textarea：剪贴板内容只有与它严格相等才可信。
-  const visibleContext = await textarea.inputValue();
-  let copyMode = 'manual';
-  let copyNote = 'component-informed-manual-selection';
-  let capturedContext = null;
-  if (statusText !== null && statusText.includes('已复制')) {
-    const clipboardText = await page
-      .evaluate(async () => {
-        try {
-          return await navigator.clipboard.readText();
-        } catch {
-          return null;
-        }
-      })
-      .catch(() => null);
-    if (typeof clipboardText === 'string') {
-      // 错误复制不能伪装为环境降级；仅断言布尔值，绝不把未知剪贴板正文写进错误报告。
-      assert.ok(clipboardText === visibleContext, 'Successful clipboard readback must equal the visible context');
-      copyMode = 'clipboard';
-      copyNote = 'clipboard-readback-equals-visible-textarea';
-      capturedContext = clipboardText;
-    } else {
-      copyNote = 'clipboard-readback-unavailable';
-    }
-  } else {
-    assert.ok(statusText.includes('手动选中') && statusText.includes('复制'), 'Clipboard rejection must show an explicit manual-copy hint');
-    copyNote = 'component-manual-selection-hint';
-  }
-  if (copyMode === 'manual') {
-    // 走组件给出的显式手动选中路径：全选可见文本（不声称剪贴板成功）。
-    const selected = await textarea.evaluate(element => {
-      element.focus();
-      element.select();
-      return element.value.slice(element.selectionStart, element.selectionEnd);
-    });
-    assert.equal(selected, visibleContext, 'Manual path must be able to select exactly the visible context text');
-    capturedContext = selected;
-  } else {
-    assert.equal(capturedContext, visibleContext);
-  }
-  report.clipboard = { mode: copyMode, note: copyNote };
-  report.checks.push(
-    copyMode === 'clipboard'
-      ? '用户点击复制后回读本次剪贴板，内容与可见 textarea 严格相等才采用'
-      : `复制回读不可用：如实走手动选中路径（mode=${copyMode}），未声称剪贴板成功，也未记录任何未知剪贴板内容`,
+  // 4) 自动目标：徽标显示当前章节标题；旧的手动复制上下文入口已从 UI 移除。
+  await waitForTarget(page, chapterATitle);
+  let target = await readTarget(page);
+  assert.equal(target.title, chapterATitle, 'The composer target chip must name the currently selected chapter');
+  assert.equal(target.caption, '默认修改当前选中', 'A selected non-dirty chapter is the automatic default target');
+  assert.equal(target.warning, null, 'A clean chapter must not show the unsaved-draft warning');
+  assert.equal(
+    await page.locator('textarea[aria-label="章节助手上下文"]').count(),
+    0,
+    'The obsolete manual context textarea must be gone from the UI',
   );
+  assert.equal(
+    await page.getByRole('button', { name: '复制章节上下文', exact: true }).count(),
+    0,
+    'The obsolete manual copy button must be gone from the UI',
+  );
+  assert.equal(
+    await page.locator('details').filter({ has: page.locator('summary', { hasText: '章节助手上下文' }) }).count(),
+    0,
+    'The obsolete collapsible manual context panel must be gone from the UI',
+  );
+  await screenshot(page, 'auto-target');
+  report.checks.push('创作助手上方“当前修改目标”自动显示当前章节标题（默认修改当前选中）；旧的手动复制/剪贴板上下文入口已不存在');
 
-  // 7) 切 B 再切 A：上下文准确更新，旧 ID 与复制提示均无残留。
+  // 5) dirty 警告：有未保存文本时出现且目标不变；恢复已保存文本后消失。
+  await editorA.fill(`${savedBodyA}\n${draftLineA}`);
+  await waitForTargetWarning(page, true);
+  target = await readTarget(page);
+  assert.equal(target.title, chapterATitle, 'A dirty draft must not change the automatic target');
+  assert.ok(target.warning.includes('未保存修改'), `The dirty warning must explain the unsaved state: ${JSON.stringify(target.warning)}`);
+  assert.ok(!target.warning.includes(draftLineA), 'The unsaved draft text must never appear in the target area');
+  assert.ok(!target.warning.includes(savedBodyA), 'The saved body must never appear in the target area either');
+  await editorA.fill(savedBodyA);
+  await waitForTargetWarning(page, false);
+  report.checks.push('未保存草稿时出现 dirty 警告且目标仍是当前章节（正文/草稿不入徽标）；恢复已保存文本后警告消失');
+
+  // 6) 新建 B 并切 B 再切 A：目标徽标随选中准确更新，无旧标题 / 无旧脏警告残留。
   //    A 之后已有章节，B 的新建表单默认收起，必须先点开同名开关再填标题、点提交。
   const chapterBInput = await openChapterCreateForm(page);
   await chapterBInput.fill(chapterBTitle);
@@ -365,43 +343,50 @@ try {
   chapterB = await chapterBResponse.json();
   assert.equal(chapterB.version, 0, 'B must start at empty v0');
   assert.equal(chapterB.text, '', 'B must start with empty text');
-  await chapterEditor(page, chapterBTitle).waitFor();
   report.fixtures.chapterB = { id: chapterB.id, title: chapterBTitle, initialVersion: chapterB.version };
   report.checks.push('通过真实 UI 新建章节 B，保持空正文 v0');
 
-  ({ details, textarea } = await openContext(page));
-  let bContext = await textarea.inputValue();
-  assert.ok(bContext.includes(`章节ID：${chapterB.id}`) && bContext.includes(`章节标题：${chapterBTitle}`));
-  assert.ok(!bContext.includes(chapterA.id), 'Switching to B must not leave A chapter id in the context');
-  assert.equal(await details.getByRole('status').count(), 0, 'A fresh chapter context must not show a stale copy status');
-  assert.equal((await chapterEditor(page, chapterBTitle).innerText()).trim(), '', 'B editor must be empty');
+  await openChapterEditor(page, chapterBTitle);
+  await waitForTarget(page, chapterBTitle);
+  target = await readTarget(page);
+  assert.equal(target.title, chapterBTitle, 'Switching to B must move the automatic target to B');
+  assert.ok(!target.title.includes(chapterATitle), 'Switching to B must not leave A title in the target chip');
+  assert.equal(target.warning, null, 'An empty clean chapter must not show the unsaved-draft warning');
+  const editorB = await openChapterEditor(page, chapterBTitle);
+  assert.equal((await editorB.innerText()).trim(), '', 'B editor must be empty');
 
   await selectChapter(page, chapterATitle);
-  ({ details, textarea } = await openContext(page));
-  const aContext = await textarea.inputValue();
-  assert.ok(aContext.includes(`章节ID：${chapterA.id}`) && aContext.includes(`章节标题：${chapterATitle}`));
-  assert.ok(!aContext.includes(chapterB.id), 'Switching back to A must not leave B chapter id in the context');
-  assert.equal(await details.getByRole('status').count(), 0, 'The copy status must not survive a chapter switch (no stale hint)');
-  assert.ok(aContext.includes('未保存草稿：无'), 'A restored to the saved body must be clean again');
-  await chapterEditor(page, chapterATitle).filter({ hasText: savedBodyA }).waitFor();
-  assert.equal((await chapterEditor(page, chapterATitle).innerText()).trim(), savedBodyA, 'Switching back must restore saved A v1, not the old empty v0 cache');
-  report.checks.push('切 B 再切 A 后上下文 ID/标题准确更新，无旧 ID、无旧复制提示残留；A 显示已保存 v1 正文且仍为干净状态');
+  await waitForTargetWarning(page, false);
+  target = await readTarget(page);
+  assert.equal(target.title, chapterATitle, 'Switching back to A must move the automatic target back to A');
+  assert.ok(!target.title.includes(chapterBTitle), 'Switching back to A must not leave B title in the target chip');
+  assert.equal(target.caption, '默认修改当前选中', 'The caption must still describe the live automatic target');
+  const editorBackA = await openChapterEditor(page, chapterATitle);
+  assert.equal((await editorBackA.innerText()).trim(), savedBodyA, 'Switching back must restore saved A v1, not the old empty v0 cache');
+  report.checks.push('切 B 再切 A 后目标标题随选中准确更新，无旧标题、无旧脏警告残留；A 显示已保存 v1 正文且仍为干净状态');
 
-  // 8) 真实模型回合：prompt 只由当前 A 的可见上下文文本 + 唯一目标正文 marker 组成。
+  // 7) 真实模型回合：composer 只写自然语言指令，目标元数据由 UI 自动附加。
   //    统一创作 Agent 没有 preset grid：首条消息直接写进“消息输入”，点“发送消息”才会
   //    新建 novel-assistant 会话，并等事件流真正连上后再投递消息。
-  assert.equal(aContext, capturedContext, 'After returning to A, the visible context must still match the explicitly copied/selected context');
+  target = await readTarget(page);
+  assert.equal(target.title, chapterATitle, 'The real turn must target the currently selected chapter A');
   const targetText = `A-TARGET-BODY-${randomUUID()}`;
-  const prompt = [
-    capturedContext,
-    '',
-    '请只处理上面这个章节：把它的正文完整替换为下面这一行纯文本（唯一内容就是一个标记，前后不要有空格、标题或换行）：',
+  const instruction = [
+    '请只处理本条消息自动附加的当前选中对象（其中 kind=chapter 的那一个），不要改动其他章节。',
+    '把它的正文完整替换为下面这一行纯文本（唯一内容就是一个标记，前后不要有空格、标题或换行）：',
     targetText,
-    '要求：必须先调用 get_chapter 读取该章节当前已保存内容与版本，再用刚读到的 expectedVersion 调用 save_chapter_draft 保存上面的完整正文；不要改动其他章节。保存成功后只用一句话回复已保存的版本号。',
+    '要求：必须先调用 get_chapter 读取该章节当前已保存内容与版本，再用刚读到的 expectedVersion 调用 save_chapter_draft 保存上面的完整正文；保存成功后只用一句话回复已保存的版本号。',
   ].join('\n');
+  // 自然语言指令里绝不能出现手动拼进去的作品/章节标识或标题。
+  assert.ok(
+    !instruction.includes(workId) && !instruction.includes(chapterA.id) && !instruction.includes(chapterATitle),
+    'The composer instruction must be natural text without manual work/chapter id or title injection',
+  );
   report.fixtures.targetMarker = targetText;
 
-  await page.getByLabel('消息输入', { exact: true }).fill(prompt);
+  await page.getByLabel('消息输入', { exact: true }).fill(instruction);
+  const selectionAtSend = (await readTarget(page)).title;
+  assert.equal(selectionAtSend, chapterATitle, 'The chip must still name A right before sending');
 
   // 只统计本轮触发的 chapterA GET（精确匹配，排除 /versions）：刷新必须有界。
   let chapterAGets = 0;
@@ -420,12 +405,67 @@ try {
   const created = await sessionCreateResponse.json();
   assert.equal(created.preset, 'novel-assistant', 'The unified Agent session must be created as novel-assistant');
   sessionId = created.id;
-  assert.match(sessionId, /^[a-f0-9-]{36}$/);
+  assert.match(sessionId, /^[0-9a-f-]{36}$/);
   report.fixtures.session = { id: sessionId, preset: created.preset };
 
   const queuedResponse = await queued;
   assert.equal(queuedResponse.status(), 202, 'The BFF must accept the queued command');
   assert.match((await queuedResponse.json()).commandId, /^[0-9a-f-]{36}$/);
+
+  // 真正发出的 payload 只在内存里检查（不写报告、不打印）：自然语言指令 + 自动附加的
+  // 五字段目标元数据；正文/草稿/其他章节 ID 一律不得出现。
+  let sentBody = null;
+  try {
+    sentBody = queuedResponse.request().postDataJSON();
+  } catch {
+    sentBody = null;
+  }
+  assert.ok(sentBody && typeof sentBody.text === 'string', 'The outgoing message body must be inspectable in memory');
+  assert.match(sentBody.commandId, /^[0-9a-f-]{36}$/);
+  const sentText = sentBody.text;
+  assert.ok(sentText.startsWith(instruction), 'The outgoing payload must start with the user natural instruction unchanged');
+  const markerIndex = sentText.indexOf(SELECTION_MARKER);
+  assert.ok(markerIndex > 0, 'The automatic selection context must be appended after the user instruction');
+  const metadata = JSON.parse(sentText.slice(markerIndex + SELECTION_MARKER.length).split('\n')[0]);
+  assert.deepEqual(
+    metadata,
+    { kind: 'chapter', workId, id: chapterA.id, title: chapterATitle, dirty: false },
+    'The frozen target metadata must name exactly the selected chapter with its live dirty flag',
+  );
+  assert.deepEqual(
+    Object.keys(metadata).sort(),
+    ['dirty', 'id', 'kind', 'title', 'workId'],
+    'Only the five projected selection fields may be attached to the outgoing payload',
+  );
+  assert.ok(!sentText.includes(savedBodyA) && !sentText.includes(draftLineA), 'Neither the saved body nor the unsaved draft may enter the outgoing payload');
+  assert.ok(!sentText.includes(chapterB.id), 'The outgoing payload must not mention another chapter id');
+  assert.ok(!sentText.includes('【章节助手上下文】') && !sentText.includes('作品ID：'), 'The obsolete manual context format must not reappear');
+  report.targetCapture = {
+    selectionAtSend,
+    metadata,
+    fields: Object.keys(metadata).sort(),
+    startsWithInstruction: sentText.startsWith(instruction),
+    carriesSavedBody: false,
+    carriesDraftBody: false,
+    carriesOtherChapterId: false,
+  };
+  report.checks.push('在内存中检查真实发出的消息：自然语言指令 + 仅五字段（kind/workId/id/title/dirty=false）的当前选中元数据，不含已保存正文、未保存草稿或其他章节 ID');
+
+  // 在途冻结（刻意不用路由 mock）：消息已 202 入队后，把 UI 选中切到 B 再切回 A。
+  // 已发出的 payload 与持久回显必须仍冻结在 A（见下方带 seq 回显断言）；实时徽标则跟随新选中。
+  // 切回 A 后重新进入编辑态，供后面的“干净编辑器采纳服务端正文”断言使用。
+  const turnActiveAtProbe = await page.evaluate(() =>
+    document.querySelector('[data-testid="chat-log"]')?.getAttribute('data-turn-active') === 'true',
+  );
+  await selectChapter(page, chapterBTitle);
+  const chipWhileProbe = (await readTarget(page)).title;
+  await selectChapter(page, chapterATitle);
+  await openChapterEditor(page, chapterATitle);
+  const chipAfterProbe = (await readTarget(page)).title;
+  assert.equal(chipWhileProbe, chapterBTitle, 'While the turn is queued the live target must follow a UI selection change');
+  assert.equal(chipAfterProbe, chapterATitle, 'Returning to A must restore the automatic target to A');
+  report.freezeProbe = { turnActiveAtProbe, chipWhileProbe, chipAfterProbe };
+  report.checks.push('在途（202 入队后）切换选中 B 再回 A：实时目标随选中变化，而此前发出的 payload/持久回显仍冻结在 A（未使用路由 mock）');
 
   // 统一 Agent 的发送顺序是真实证据：先建会话、再订阅事件流、连上后才投递消息。
   const firstIndex = kind => requestOrder.indexOf(kind);
@@ -469,11 +509,14 @@ try {
   });
   const userBubbles = await readUserBubbles();
   const markerBubbles = (userBubbles ?? []).filter(bubble => bubble.text.includes(targetText));
-  assert.equal(markerBubbles.length, 1, `The persisted user message must appear exactly once: ${JSON.stringify(userBubbles)}`);
+  assert.equal(markerBubbles.length, 1, `The persisted user message must appear exactly once: ${JSON.stringify(userBubbles?.map(bubble => ({ seq: bubble.seq, pending: bubble.pending, chars: bubble.text.length })))}`);
   assert.equal(markerBubbles[0].pending, false, 'A confirmed user message must not keep its local pending copy');
   assert.ok(markerBubbles[0].seq !== null && markerBubbles[0].seq !== '', 'The single user message must be the durable one (with seq)');
   assert.equal((userBubbles ?? []).filter(bubble => bubble.pending).length, 0, 'No pending placeholder may survive the durable echo');
-  report.checks.push('持久带 seq 用户回显恰好一条且无 pending 副本（由 commandId 替换，不靠正文去重）');
+  // 持久回显必须携带冻结在发送瞬间的目标：A 的 id 在，其他章节的 id 不在。
+  assert.ok(markerBubbles[0].text.includes(`"id":"${chapterA.id}"`), 'The durable echo must carry the frozen target metadata for chapter A');
+  assert.ok(!markerBubbles[0].text.includes(`"id":"${chapterB.id}"`), 'The durable echo must not carry another chapter id');
+  report.checks.push('持久带 seq 用户回显恰好一条且无 pending 副本（由 commandId 替换，不靠正文去重），且回显里的冻结目标元数据仍指向 A');
 
   const readRound = () => page.evaluate(() => {
     const log = document.querySelector('[data-testid="chat-log"]');
@@ -563,7 +606,7 @@ try {
   );
   report.runStatus = runStatus;
 
-  // 9) 公共 HTTP 独立确认：A 精确正文、版本推进 + 历史；B 文本/版本不变。
+  // 8) 公共 HTTP 独立确认：A 精确正文、版本推进 + 历史；B 文本/版本不变。
   const chapterAfter = await apiGet(`/works/${workId}/chapters/${chapterA.id}`);
   assert.equal(chapterAfter.status(), 200);
   const chapterAfterJson = await chapterAfter.json();
@@ -583,7 +626,7 @@ try {
   report.fixtures.chapterB.finalVersion = chapterBAfterJson.version;
   report.checks.push('公共 HTTP 独立确认：A 正文精确等于 marker、版本 +1、历史含 v1 与新版本；B 文本/版本不变');
 
-  // 10) 干净编辑器自动采用服务端新正文/版本，且本轮 chapterA GET 有界（1..3）。
+  // 9) 干净编辑器自动采用服务端新正文/版本，且本轮 chapterA GET 有界（1..3）。
   //     中栏是 `section[aria-label="作品内容"]`，不再有旧的 `.workspace-column` 包装层。
   const editorText = () => page.evaluate(() => document.querySelector('[aria-label="作品内容"] [aria-label^="章节正文"] [contenteditable="true"]')?.innerText ?? null);
   const editorAdopted = await page
@@ -610,6 +653,10 @@ try {
   assert.ok(chapterAGets <= 3, `Chapter A refresh must stay bounded per turn, got ${chapterAGets} GETs`);
   report.checks.push(`持久终态后干净编辑器自动显示服务端正文 v${chapterAfterJson.version} 且无未保存标记；本轮 chapterA GET ${chapterAGets} 次（1..3 有界，不含 versions）`);
 
+  // 回合结束后目标徽标仍指向当前选中章节（自动目标不因回合改变）。
+  target = await readTarget(page);
+  assert.equal(target.title, chapterATitle, 'The automatic target must still name the selected chapter after the turn');
+
   await openHistoryPanel(page);
   const sessionStillActive = await page.evaluate(() =>
     [...document.querySelectorAll('.conversation-history .item .item-sub')].some(item =>
@@ -618,10 +665,10 @@ try {
   );
   assert.ok(sessionStillActive, 'The session card must still report the server-observed active binding after the turn');
 
-  // 断言完成后再截图（model 回合后：编辑器与上下文一致）。
+  // 断言完成后再截图（model 回合后：编辑器与自动目标一致）。
   await screenshot(page, 'model-roundtrip');
 
-  // 11) UI“永久结束对话”→ DELETE 204；随后公共 HTTP 发消息必须 410。
+  // 10) UI“永久结束对话”→ DELETE 204；随后公共 HTTP 发消息必须 410。
   //     会话操作默认收起，且永久结束带 window.confirm，必须先展开再确认。
   const sessionOptions = page.locator('.session-options');
   if (!(await sessionOptions.evaluate(node => node.open))) await sessionOptions.locator('summary').click();
@@ -643,7 +690,7 @@ try {
   report.checks.push('GUI“永久结束对话”返回 204；随后公共 HTTP（CSRF 仅内存）发消息得到 410');
   await screenshot(page, 'after-revocations');
 
-  // 12) 整套请求数保持在一个 120/min 窗口以内。
+  // 11) 整套请求数保持在一个 120/min 窗口以内。
   const total = browserApiRequests + directApiRequests;
   report.requestCount = { browser: browserApiRequests, direct: directApiRequests, total };
   assert.ok(total <= 80, `Whole acceptance must stay under the 120/min window with margin, got ${total} API requests`);

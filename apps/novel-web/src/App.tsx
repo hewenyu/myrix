@@ -16,6 +16,7 @@ import { useTurnRefresh } from "./state/useTurnRefresh";
 import { useSessions } from "./state/useWorkspace";
 import { useWorks } from "./state/useWorks";
 import { describeRunState } from "./state/status";
+import type { SelectionContext } from "./state/selectionContext";
 
 /** 作品/会话原子选择；显式导航推进代际，迟到的异步回包不能抢走新选择。 */
 export interface Selection { workId: string | null; sessionId: string | null; generation: number }
@@ -35,6 +36,8 @@ function Workspace({ session, onLogout, logoutPending }: { session: AuthSession 
   const [editorDirty, setEditorDirty] = useState(false);
   const [composerDirty, setComposerDirty] = useState(false);
   const [mobilePane, setMobilePane] = useState("content");
+  const [focused, setFocused] = useState(false);
+  const [selectionContext, setSelectionContext] = useState<SelectionContext | null>(null);
   const committed = useRef(selection);
   useLayoutEffect(() => { committed.current = selection; }, [selection]);
   const mounted = useRef(true);
@@ -65,6 +68,7 @@ function Workspace({ session, onLogout, logoutPending }: { session: AuthSession 
       <div className="brand"><span className="brand-mark"><Icon name="book" size={20} /></span><span>Myrix</span></div>
       {selection.workId ? <><span className="topbar-divider" /><button className="text-button back-button" type="button" onClick={() => selectWork(null)}><Icon name="back" size={16} />书架</button><span className="topbar-book" title={selectedWork?.title}>{selectedWork?.title ?? "正在打开书本…"}</span></> : <span className="brand-caption">给故事一个生长的地方</span>}
       <span className="spacer" />
+      {selection.workId ? <button className="text-button focus-toggle" type="button" aria-pressed={focused} onClick={() => { setFocused(!focused); setMobilePane("content"); }}>{focused ? "退出专注" : "专注写作"}</button> : null}
       <details className="account-menu"><summary><span className="avatar">{session?.identity.displayName.slice(0, 1) || "我"}</span><span>{session?.identity.displayName || "我的账户"}</span></summary><StatusBar session={session} runtimeState={runState} modelConfigured={stream.serverStatus === "model-not-configured" ? false : null} onLogout={() => { if (leave()) onLogout(); }} logoutPending={logoutPending} /></details>
     </header>
     {worksState.removeError ? <Banner level="error">{worksState.removeError}</Banner> : null}
@@ -79,11 +83,11 @@ function Workspace({ session, onLogout, logoutPending }: { session: AuthSession 
         } catch { /* mutation 展示原因并保留创建草稿 */ }
       }} createPending={worksState.createPending} createError={worksState.createError}
       onDelete={(workId) => { void worksState.remove(workId).catch(() => undefined); }} deletePending={worksState.removePending} onReload={() => void worksState.refetch()} /> : <>
-      <nav className="mobile-switcher" aria-label="创作区域"><button type="button" aria-pressed={mobilePane === "directory"} onClick={() => setMobilePane("directory")}>目录</button><button type="button" aria-pressed={mobilePane === "content"} onClick={() => setMobilePane("content")}>正文</button><button type="button" aria-pressed={mobilePane === "assistant"} onClick={() => setMobilePane("assistant")}>Agent</button></nav>
-      <main className="studio-layout" data-mobile-pane={mobilePane}>
-        <WorkspacePane key={`workspace:${selection.workId}`} workId={selection.workId} workTitle={selectedWork?.title ?? null} onDirtyChange={setEditorDirty} />
+      <nav className="mobile-switcher" aria-label="创作区域"><button type="button" aria-pressed={mobilePane === "directory"} onClick={() => setMobilePane("directory")}>目录</button><button type="button" aria-pressed={mobilePane === "content"} onClick={() => setMobilePane("content")}>正文</button><button type="button" aria-pressed={mobilePane === "assistant"} onClick={() => setMobilePane("assistant")}>助手</button></nav>
+      <main className={`studio-layout${focused ? " is-focused" : ""}`} data-mobile-pane={mobilePane}>
+        <WorkspacePane key={`workspace:${selection.workId}`} workId={selection.workId} workTitle={selectedWork?.title ?? null} onDirtyChange={setEditorDirty} onSelectionContextChange={setSelectionContext} onNavigateContent={() => setMobilePane("content")} />
         <AssistantPanel key={`assistant:${selection.workId}`} workId={selection.workId} sessions={sessionsState.items} sessionsLoading={sessionsState.isLoading} sessionsError={sessionsState.error}
-          selectedSessionId={selection.sessionId}
+          selectedSessionId={selection.sessionId} selectionContext={selectionContext?.workId === selection.workId ? selectionContext : null}
           onSelectSession={(sessionId) => setSelection((prev) => ({ ...prev, sessionId, generation: prev.generation + 1 }))}
           onNewConversation={() => setSelection((prev) => ({ ...prev, sessionId: null, generation: prev.generation + 1 }))}
           onCreateSession={async (preset: NovelPreset) => {

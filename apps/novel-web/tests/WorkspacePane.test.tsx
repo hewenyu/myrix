@@ -1,5 +1,5 @@
 import type { BibleEntry, Chapter, Outline, SaveResult } from "@myrix/contracts";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -99,6 +99,7 @@ vi.mock("../src/components/PlainTextEditor", () => ({
 }));
 
 import { WorkspacePane } from "../src/panels/WorkspacePane";
+import type { SelectionContext } from "../src/state/selectionContext";
 
 const ISO = "2026-01-01T00:00:00.000Z";
 const outline: Outline = { workId: "w1", text: "大纲正文", version: 3, updatedAt: ISO };
@@ -126,12 +127,37 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function renderPane(props: { workId?: string | null; workTitle?: string | null; onDirtyChange?: (dirty: boolean) => void } = {}) {
+function renderPane(props: {
+  workId?: string | null;
+  workTitle?: string | null;
+  onDirtyChange?: (dirty: boolean) => void;
+  onSelectionContextChange?: (context: SelectionContext | null) => void;
+} = {}) {
   return render(<WorkspacePane workId="w1" workTitle="作品一" {...props} />);
 }
 
 function textValue(label: string | RegExp): string {
   return (screen.getByLabelText(label) as HTMLTextAreaElement).value;
+}
+
+/** 某个文稿是否已挂载（阅读态 aria-label 带“阅读”后缀，编辑态不带）。 */
+function manuscriptMounted(label: string): boolean {
+  return screen.queryByLabelText(label) !== null || screen.queryByLabelText(`${label}阅读`) !== null;
+}
+
+/**
+ * 进入某个文稿的编辑态：已有正文且无未保存草稿时 Manuscript 默认阅读，
+ * 必须先点“编辑原文”。这正是作者的真实操作路径，不为了测试走捷径。
+ */
+async function enterEdit(
+  user: ReturnType<typeof userEvent.setup>,
+  label: string,
+): Promise<HTMLTextAreaElement> {
+  await waitFor(() => expect(manuscriptMounted(label)).toBe(true));
+  if (screen.queryByLabelText(label) === null) {
+    await user.click(screen.getByRole("button", { name: "编辑原文" }));
+  }
+  return screen.getByLabelText(label) as HTMLTextAreaElement;
 }
 
 beforeEach(() => {
@@ -169,7 +195,7 @@ describe("WorkspacePane 书内首开建议", () => {
     outlineData = outline;
     renderPane();
 
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(true));
     expect(screen.getByRole("button", { name: "章节" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /第一章/ })).toHaveAttribute("aria-current", "true");
   });
@@ -179,7 +205,7 @@ describe("WorkspacePane 书内首开建议", () => {
     outlineData = outline;
     renderPane();
 
-    await waitFor(() => expect(screen.getByLabelText("作品大纲")).toBeDefined());
+    await waitFor(() => expect(manuscriptMounted("作品大纲")).toBe(true));
     expect(screen.getByRole("button", { name: "大纲" })).toHaveAttribute("aria-pressed", "true");
     expect(fns.outlineSave).not.toHaveBeenCalled();
     expect(fns.chapterSave).not.toHaveBeenCalled();
@@ -205,7 +231,7 @@ describe("WorkspacePane 书内首开建议", () => {
 
     // 用户已经显式选了分区：首开建议不得替他选中第一章。
     expect(screen.getByText("请选择或新建一个章节。")).toBeDefined();
-    expect(screen.queryByLabelText("章节正文：第一章")).toBeNull();
+    expect(manuscriptMounted("章节正文：第一章")).toBe(false);
     expect(screen.getByRole("button", { name: "章节" })).toHaveAttribute("aria-pressed", "true");
   });
 });
@@ -215,14 +241,14 @@ describe("WorkspacePane 目录与中栏分工", () => {
     chaptersData = [chapterA, chapterB];
     chapterById = { "c-a": chapterA, "c-b": chapterB };
     renderPane();
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(true));
 
     const nav = screen.getByRole("navigation", { name: "书内目录" });
     const main = screen.getByRole("region", { name: "作品内容" });
     expect(within(nav).getByRole("button", { name: /第二章/ })).toBeDefined();
     expect(within(main).queryByRole("button", { name: /第二章/ })).toBeNull();
     expect(within(main).queryByLabelText("新章节标题")).toBeNull();
-    expect(within(main).getByLabelText("章节正文：第一章")).toBeDefined();
+    expect(within(main).getByLabelText("章节正文：第一章阅读")).toBeDefined();
   });
 
   it("点击目录里的设定条目，中栏切换到该条目编辑器", async () => {
@@ -231,11 +257,12 @@ describe("WorkspacePane 目录与中栏分工", () => {
     chapterById = { "c-a": chapterA };
     bibleData = [character, setting];
     renderPane();
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(true));
 
     await user.click(screen.getByRole("button", { name: /世界观/ }));
     expect(screen.getByRole("button", { name: "设定圣经" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("heading", { name: /世界观/ })).toBeDefined();
+    expect(screen.getByRole("heading", { level: 1, name: "世界观" })).toBeDefined();
+    await enterEdit(user, "条目内容（纯文本）");
     expect(textValue("条目内容（纯文本）")).toBe(setting.text);
   });
 });
@@ -246,9 +273,9 @@ describe("WorkspacePane 未保存草稿保护", () => {
     chaptersData = [chapterA, chapterB];
     chapterById = { "c-a": chapterA, "c-b": chapterB };
     renderPane();
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    const field = await enterEdit(user, "章节正文：第一章");
 
-    await user.type(screen.getByLabelText("章节正文：第一章"), "未保存草稿");
+    await user.type(field, "未保存草稿");
     const draft = textValue("章节正文：第一章");
     expect(draft).not.toBe(chapterA.text);
 
@@ -263,7 +290,7 @@ describe("WorkspacePane 未保存草稿保护", () => {
 
     confirmSpy.mockReturnValue(true);
     await user.click(screen.getByRole("button", { name: /第二章/ }));
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第二章")).toBeDefined());
+    await waitFor(() => expect(manuscriptMounted("章节正文：第二章")).toBe(true));
     expect(screen.getByRole("button", { name: /第二章/ })).toHaveAttribute("aria-current", "true");
   });
 
@@ -274,9 +301,9 @@ describe("WorkspacePane 未保存草稿保护", () => {
     const gate = deferred<SaveResult>();
     fns.chapterSave.mockReturnValueOnce(gate.promise);
     renderPane();
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    const field = await enterEdit(user, "章节正文：第一章");
 
-    await user.type(screen.getByLabelText("章节正文：第一章"), "草稿");
+    await user.type(field, "草稿");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     const confirmSpy = vi.fn().mockReturnValue(false);
@@ -284,14 +311,14 @@ describe("WorkspacePane 未保存草稿保护", () => {
     await user.click(screen.getByRole("button", { name: /第二章/ }));
     expect(confirmSpy).toHaveBeenCalledTimes(1);
     expect(confirmSpy.mock.calls[0]?.[0]).toContain("正在保存");
-    expect(screen.queryByLabelText("章节正文：第二章")).toBeNull();
+    expect(manuscriptMounted("章节正文：第二章")).toBe(false);
 
     await act(async () => {
       gate.resolve({ status: "saved", version: 2 });
       await Promise.resolve();
     });
     // 在途保存照常落地，章节没有被切走。
-    expect(screen.getByLabelText("章节正文：第一章")).toBeDefined();
+    expect(manuscriptMounted("章节正文：第一章")).toBe(true);
   });
 
   it("切换分区不丢章节草稿也不弹确认：去大纲再回来草稿仍在", async () => {
@@ -300,16 +327,16 @@ describe("WorkspacePane 未保存草稿保护", () => {
     chapterById = { "c-a": chapterA };
     outlineData = outline;
     renderPane();
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    const field = await enterEdit(user, "章节正文：第一章");
 
-    await user.type(screen.getByLabelText("章节正文：第一章"), "分区切换草稿");
+    await user.type(field, "分区切换草稿");
     const draft = textValue("章节正文：第一章");
 
     const confirmSpy = vi.fn().mockReturnValue(false);
     vi.stubGlobal("confirm", confirmSpy);
 
     await user.click(screen.getByRole("button", { name: "大纲" }));
-    expect(screen.getByLabelText("作品大纲")).toBeDefined();
+    expect(manuscriptMounted("作品大纲")).toBe(true);
     expect(confirmSpy).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "章节" }));
@@ -328,7 +355,7 @@ describe("WorkspacePane 异步选择归属", () => {
     const gate = deferred<Chapter>();
     fns.chaptersCreate.mockReturnValueOnce(gate.promise);
     renderPane();
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(true));
 
     await user.click(screen.getByRole("button", { name: "新建章节" }));
     await user.type(screen.getByLabelText("新章节标题"), "迟到的章节");
@@ -337,7 +364,7 @@ describe("WorkspacePane 异步选择归属", () => {
 
     // 用户在保存/创建期间显式回到大纲。
     await user.click(screen.getByRole("button", { name: "大纲" }));
-    expect(screen.getByLabelText("作品大纲")).toBeDefined();
+    expect(manuscriptMounted("作品大纲")).toBe(true);
 
     await act(async () => {
       gate.resolve(chapterC);
@@ -345,7 +372,7 @@ describe("WorkspacePane 异步选择归属", () => {
     });
 
     expect(screen.getByRole("button", { name: "大纲" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.queryByLabelText("章节正文：迟到的章节")).toBeNull();
+    expect(manuscriptMounted("章节正文：迟到的章节")).toBe(false);
   });
 
   it("新建设定条目的迟到回包不抢回用户随后选中的条目", async () => {
@@ -356,7 +383,7 @@ describe("WorkspacePane 异步选择归属", () => {
     const gate = deferred<BibleEntry>();
     fns.bibleCreate.mockReturnValueOnce(gate.promise);
     renderPane();
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(true));
 
     await user.click(screen.getByRole("button", { name: "设定圣经" }));
     await user.click(screen.getByRole("button", { name: "新增条目" }));
@@ -366,6 +393,7 @@ describe("WorkspacePane 异步选择归属", () => {
 
     // 创建期间用户显式改选了另一个条目。
     await user.click(screen.getByRole("button", { name: /世界观/ }));
+    await enterEdit(user, "条目内容（纯文本）");
     expect(textValue("条目内容（纯文本）")).toBe(setting.text);
 
     await act(async () => {
@@ -385,10 +413,10 @@ describe("WorkspacePane dirty 通知", () => {
     chapterById = { "c-a": chapterA };
     const onDirtyChange = vi.fn();
     const { unmount } = renderPane({ onDirtyChange });
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
+    const field = await enterEdit(user, "章节正文：第一章");
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
 
-    await user.type(screen.getByLabelText("章节正文：第一章"), "草稿");
+    await user.type(field, "草稿");
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
 
     unmount();
@@ -401,8 +429,8 @@ describe("WorkspacePane dirty 通知", () => {
     chapterById = { "c-a": chapterA };
     const onDirtyChange = vi.fn();
     const view = renderPane({ onDirtyChange });
-    await waitFor(() => expect(screen.getByLabelText("章节正文：第一章")).toBeDefined());
-    await user.type(screen.getByLabelText("章节正文：第一章"), "草稿");
+    const field = await enterEdit(user, "章节正文：第一章");
+    await user.type(field, "草稿");
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
 
     // 新作品没有任何章节：中栏不得继续显示上一个作品的章节草稿。
@@ -411,7 +439,7 @@ describe("WorkspacePane dirty 通知", () => {
     outlineData = outline;
     view.rerender(<WorkspacePane workId="w2" workTitle="作品二" onDirtyChange={onDirtyChange} />);
 
-    await waitFor(() => expect(screen.queryByLabelText("章节正文：第一章")).toBeNull());
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(false));
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
     expect(screen.getByRole("button", { name: "大纲" })).toHaveAttribute("aria-pressed", "true");
   });
@@ -436,5 +464,262 @@ describe("WorkspacePane 空态", () => {
     const retries = screen.getAllByRole("button", { name: "重试" });
     await user.click(retries[0] as HTMLElement);
     expect(fns.outlineRefetch.mock.calls.length + fns.chaptersRefetch.mock.calls.length).toBeGreaterThan(0);
+  });
+});
+
+describe("WorkspacePane 选中对象元数据", () => {
+  it("上报 kind/workId/id/title/dirty，且只包含这五个字段", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA, chapterB];
+    chapterById = { "c-a": chapterA, "c-b": chapterB };
+    outlineData = outline;
+    bibleData = [character];
+    const onSelectionContextChange = vi.fn();
+    renderPane({ onSelectionContextChange });
+
+    // 首开建议选中第一章：目标是章节，dirty 为 false。
+    await waitFor(() =>
+      expect(onSelectionContextChange).toHaveBeenLastCalledWith({
+        kind: "chapter",
+        workId: "w1",
+        id: "c-a",
+        title: "第一章",
+        dirty: false,
+      } satisfies SelectionContext),
+    );
+
+    // 出现未保存草稿后，同一个目标立刻带上 dirty: true。
+    const field = await enterEdit(user, "章节正文：第一章");
+    await user.type(field, "草稿");
+    await waitFor(() =>
+      expect(onSelectionContextChange).toHaveBeenLastCalledWith({
+        kind: "chapter",
+        workId: "w1",
+        id: "c-a",
+        title: "第一章",
+        dirty: true,
+      }),
+    );
+
+    // 只投影五个字段：没有正文、版本或凭证。
+    const last = onSelectionContextChange.mock.calls.at(-1)?.[0] as SelectionContext;
+    expect(Object.keys(last).sort()).toEqual(["dirty", "id", "kind", "title", "workId"]);
+
+    // 切到大纲：目标随之变成大纲对象（id 用 workId）。
+    await user.click(screen.getByRole("button", { name: "大纲" }));
+    await waitFor(() =>
+      expect(onSelectionContextChange).toHaveBeenLastCalledWith({
+        kind: "outline",
+        workId: "w1",
+        id: "w1",
+        title: "故事大纲",
+        dirty: false,
+      }),
+    );
+
+    // 切到设定：目标是条目本身。
+    await user.click(screen.getByRole("button", { name: /主角/ }));
+    await waitFor(() =>
+      expect(onSelectionContextChange).toHaveBeenLastCalledWith({
+        kind: "bible",
+        workId: "w1",
+        id: "b-1",
+        title: "主角",
+        dirty: false,
+      }),
+    );
+  });
+
+  it("章节与设定的 dirty 只反映当前选中对象", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA];
+    chapterById = { "c-a": chapterA };
+    bibleData = [character];
+    const onSelectionContextChange = vi.fn();
+    renderPane({ onSelectionContextChange });
+
+    const field = await enterEdit(user, "章节正文：第一章");
+    await user.type(field, "章节草稿");
+    await waitFor(() =>
+      expect(onSelectionContextChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: "chapter", dirty: true }),
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: /主角/ }));
+    await waitFor(() =>
+      expect(onSelectionContextChange).toHaveBeenLastCalledWith({
+        kind: "bible",
+        workId: "w1",
+        id: "b-1",
+        title: "主角",
+        dirty: false,
+      }),
+    );
+  });
+
+  it("未选择作品时上报 null，不伪造目标", () => {
+    const onSelectionContextChange = vi.fn();
+    renderPane({ workId: null, workTitle: null, onSelectionContextChange });
+    expect(onSelectionContextChange).toHaveBeenLastCalledWith(null);
+  });
+});
+
+describe("WorkspacePane 键盘保存（Ctrl/Cmd+S）", () => {
+  it("只在当前编辑器有未保存修改时保存，并吞掉浏览器默认保存", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA];
+    chapterById = { "c-a": chapterA };
+    renderPane();
+    const field = await enterEdit(user, "章节正文：第一章");
+
+    // 无修改：不保存，但仍显式处理快捷键。
+    const noModification = fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    expect(fns.chapterSave).not.toHaveBeenCalled();
+    expect(noModification).toBe(false);
+
+    await user.type(field, "草稿");
+    const handled = fireEvent.keyDown(window, { key: "S", metaKey: true });
+    expect(handled).toBe(false);
+    await waitFor(() => expect(fns.chapterSave).toHaveBeenCalledTimes(1));
+    expect(fns.chapterSave).toHaveBeenCalledWith({ text: `${chapterA.text}草稿`, expectedVersion: 1 });
+  });
+
+  it("输入法组合中不触发保存，也不吞掉默认行为", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA];
+    chapterById = { "c-a": chapterA };
+    renderPane();
+    const field = await enterEdit(user, "章节正文：第一章");
+    await user.type(field, "组合文本");
+
+    const composed = fireEvent.keyDown(window, { key: "s", ctrlKey: true, isComposing: true });
+    expect(composed).toBe(true);
+    const legacyComposition = fireEvent.keyDown(window, { key: "s", metaKey: true, isComposing: false, keyCode: 229 });
+    expect(legacyComposition).toBe(true);
+    expect(fns.chapterSave).not.toHaveBeenCalled();
+  });
+
+  it("保存进行中按 Ctrl+S 不重复提交", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA];
+    chapterById = { "c-a": chapterA };
+    const gate = deferred<SaveResult>();
+    fns.chapterSave.mockReturnValueOnce(gate.promise);
+    renderPane();
+    const field = await enterEdit(user, "章节正文：第一章");
+    await user.type(field, "草稿");
+
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await waitFor(() => expect(fns.chapterSave).toHaveBeenCalledTimes(1));
+
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    expect(fns.chapterSave).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      gate.resolve({ status: "saved", version: 2 });
+      await Promise.resolve();
+    });
+  });
+
+  it("冲突未裁决时按 Ctrl+S 不发新请求，本地草稿保留", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA];
+    chapterById = { "c-a": chapterA };
+    fns.chapterSave.mockResolvedValueOnce({ status: "conflict", version: 5 });
+    renderPane();
+    const field = await enterEdit(user, "章节正文：第一章");
+    await user.type(field, "会冲突的草稿");
+
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("保存冲突"));
+
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    expect(fns.chapterSave).toHaveBeenCalledTimes(1);
+    expect(textValue("章节正文：第一章")).toContain("会冲突的草稿");
+  });
+});
+
+describe("WorkspacePane onNavigateContent 回调", () => {
+  it("书内首开建议不算用户选择，不通知移动端切栏", async () => {
+    chaptersData = [chapterA, chapterB];
+    chapterById = { "c-a": chapterA, "c-b": chapterB };
+    const onNavigateContent = vi.fn();
+    render(
+      <WorkspacePane workId="w1" workTitle="作品一" onNavigateContent={onNavigateContent} />,
+    );
+
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(true));
+    // 初始定位只是界面建议，移动端不应被强行切到正文。
+    expect(onNavigateContent).not.toHaveBeenCalled();
+  });
+
+  it("用户接受的选择通知切栏；拒绝丢弃草稿时既不切换也不通知", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA, chapterB];
+    chapterById = { "c-a": chapterA, "c-b": chapterB };
+    const onNavigateContent = vi.fn();
+    render(
+      <WorkspacePane workId="w1" workTitle="作品一" onNavigateContent={onNavigateContent} />,
+    );
+    const field = await enterEdit(user, "章节正文：第一章");
+    await user.type(field, "未保存草稿");
+
+    const confirmSpy = vi.fn().mockReturnValue(false);
+    vi.stubGlobal("confirm", confirmSpy);
+    await user.click(screen.getByRole("button", { name: /第二章/ }));
+    expect(onNavigateContent).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    await user.click(screen.getByRole("button", { name: /第二章/ }));
+    await waitFor(() => expect(manuscriptMounted("章节正文：第二章")).toBe(true));
+    expect(onNavigateContent).toHaveBeenCalledTimes(1);
+  });
+
+  it("成功新建章节后通知切栏", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA];
+    chapterById = { "c-a": chapterA, "c-c": chapterC };
+    fns.chaptersCreate.mockResolvedValueOnce(chapterC);
+    const onNavigateContent = vi.fn();
+    render(
+      <WorkspacePane workId="w1" workTitle="作品一" onNavigateContent={onNavigateContent} />,
+    );
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(true));
+
+    await user.click(screen.getByRole("button", { name: "新建章节" }));
+    await user.type(screen.getByLabelText("新章节标题"), "迟到的章节");
+    await user.click(screen.getByRole("button", { name: "新建章节" }));
+
+    await waitFor(() => expect(manuscriptMounted("章节正文：迟到的章节")).toBe(true));
+    expect(onNavigateContent).toHaveBeenCalledTimes(1);
+  });
+
+  it("迟到的新建回包不抢选择，也不通知切栏", async () => {
+    const user = userEvent.setup();
+    chaptersData = [chapterA];
+    chapterById = { "c-a": chapterA, "c-c": chapterC };
+    outlineData = outline;
+    const gate = deferred<Chapter>();
+    fns.chaptersCreate.mockReturnValueOnce(gate.promise);
+    const onNavigateContent = vi.fn();
+    render(
+      <WorkspacePane workId="w1" workTitle="作品一" onNavigateContent={onNavigateContent} />,
+    );
+    await waitFor(() => expect(manuscriptMounted("章节正文：第一章")).toBe(true));
+
+    await user.click(screen.getByRole("button", { name: "新建章节" }));
+    await user.type(screen.getByLabelText("新章节标题"), "迟到的章节");
+    await user.click(screen.getByRole("button", { name: "新建章节" }));
+    await user.click(screen.getByRole("button", { name: "大纲" }));
+    const accepted = onNavigateContent.mock.calls.length;
+
+    await act(async () => {
+      gate.resolve(chapterC);
+      await Promise.resolve();
+    });
+
+    expect(onNavigateContent.mock.calls.length).toBe(accepted);
+    expect(screen.getByRole("button", { name: "大纲" })).toHaveAttribute("aria-pressed", "true");
   });
 });

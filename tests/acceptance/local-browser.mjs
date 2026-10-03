@@ -76,6 +76,9 @@ try {
   await page.reload({ waitUntil: 'domcontentloaded' });
   await openBook(page, title);
   await page.getByRole('button', { name: '大纲', exact: true }).click();
+  await page.getByRole('article', { name: '作品大纲阅读', exact: true }).waitFor();
+  assert.equal(await page.getByRole('article', { name: '作品大纲阅读', exact: true }).innerText(), text);
+  await page.getByRole('button', { name: '编辑原文', exact: true }).click();
   await editor.waitFor();
   assert.equal(await editor.innerText(), text);
   result.checks.push('Reload preserves the authenticated session and stored outline');

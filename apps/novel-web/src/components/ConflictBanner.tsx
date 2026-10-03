@@ -1,4 +1,5 @@
 import type { DraftConflict } from "../state/draft";
+import { ReadingContent } from "./ReadingContent";
 
 export interface ConflictBannerProps {
   conflict: DraftConflict;
@@ -89,13 +90,15 @@ export function ConflictBanner({
             <div className="row" style={{ alignItems: "stretch", gap: 8 }}>
               <div style={{ flex: "1 1 0", minWidth: 0 }}>
                 <div className="small muted">本地草稿（未保存）</div>
-                <pre className="code">{conflict.localText}</pre>
+                <ReadingContent className="comparison-reading" text={conflict.localText} />
+                <details className="source-details"><summary>查看原文</summary><pre className="code">{conflict.localText}</pre></details>
               </div>
               <div style={{ flex: "1 1 0", minWidth: 0 }}>
                 <div className="small muted">
                   {hasFreshServer ? `服务端版本 ${serverVersion}` : `服务端旧快照（版本 ${serverVersion}）`}
                 </div>
-                <pre className="code">{serverText}</pre>
+                <ReadingContent className="comparison-reading" text={serverText ?? ""} />
+                <details className="source-details"><summary>查看原文</summary><pre className="code">{serverText}</pre></details>
               </div>
             </div>
           ) : null}

@@ -22,6 +22,7 @@
     "test": "vitest run && pnpm --filter @myrix/novel-web test",
     "build:web": "pnpm --filter @myrix/novel-web build",
     "test:browser": "node tests/acceptance/local-browser.mjs",
+    "test:browser:ui": "node tests/acceptance/author-ui.mjs",
     "test:watch": "vitest",
     "setup:dev": "tsx apps/bff/scripts/setup-dev.ts",
     "dev": "tsx apps/bff/scripts/start-dev.ts",

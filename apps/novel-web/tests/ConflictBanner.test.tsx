@@ -34,11 +34,22 @@ describe("ConflictBanner", () => {
     const onSaveOverwrite = vi.fn();
     const user = userEvent.setup();
 
-    renderBanner({ onReload, onTakeServer, onSaveOverwrite });
+    const { container } = renderBanner({ onReload, onTakeServer, onSaveOverwrite });
 
     expect(screen.getByRole("alert").textContent).toContain("本地未保存内容已保留");
-    expect(screen.getByText("我的本地草稿")).toBeDefined();
-    expect(screen.getByText("服务端内容")).toBeDefined();
+
+    // 语义阅读：本地草稿与服务端内容各渲染一处，且不丢源文。
+    const readings = [...container.querySelectorAll(".comparison-reading")];
+    expect(readings).toHaveLength(2);
+    expect(readings[0]?.textContent).toBe("我的本地草稿");
+    expect(readings[1]?.textContent).toBe("服务端内容");
+
+    // 逐字原文保留在默认折叠的“查看原文”里。
+    const sources = [...container.querySelectorAll("details.source-details")];
+    expect(sources).toHaveLength(2);
+    expect(sources.every((node) => !node.hasAttribute("open"))).toBe(true);
+    expect(sources[0]?.querySelector("pre.code")?.textContent).toBe("我的本地草稿");
+    expect(sources[1]?.querySelector("pre.code")?.textContent).toBe("服务端内容");
 
     await user.click(screen.getByRole("button", { name: /重新读取服务端/ }));
     await user.click(screen.getByRole("button", { name: /采用服务端内容/ }));
@@ -63,7 +74,7 @@ describe("ConflictBanner", () => {
     const user = userEvent.setup();
 
     // 真实场景：落盘版本已是 3，但窗口里的 draft.server 还是基线 1。
-    renderBanner({
+    const { container } = renderBanner({
       conflict: { ...conflict, expectedVersion: 1, serverVersion: 3 },
       serverText: "服务端旧快照",
       serverVersion: 1,
@@ -76,8 +87,9 @@ describe("ConflictBanner", () => {
     expect(screen.getByRole("button", { name: /以最新版本提交本地草稿/ })).toBeDisabled();
     expect(screen.getByRole("status").textContent).toContain("请先点“重新读取服务端”");
     expect(screen.getByRole("status").textContent).toContain("低于冲突报告的版本 3");
-    // 本地草稿仍然展示，未被覆盖。
-    expect(screen.getByText("我的本地草稿")).toBeDefined();
+    // 本地草稿仍然展示，未被覆盖；原始文本仍可从“查看原文”逐字核对。
+    expect(container.querySelector(".comparison-reading")?.textContent).toBe("我的本地草稿");
+    expect(container.querySelector("details.source-details pre.code")?.textContent).toBe("我的本地草稿");
 
     await user.click(screen.getByRole("button", { name: /采用服务端内容/ }));
     await user.click(screen.getByRole("button", { name: /以最新版本提交本地草稿/ }));

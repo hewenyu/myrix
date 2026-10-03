@@ -1,9 +1,10 @@
 import type { NovelSession } from "@myrix/contracts";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { AssistantPanel, type AssistantPanelProps } from "../src/panels/AssistantPanel";
+import type { SelectionContext } from "../src/state/selectionContext";
 import type { SessionStreamState } from "../src/state/useSessionStream";
 
 /**
@@ -512,6 +513,152 @@ describe("AssistantPanel 草稿保留与在途修改", () => {
   });
 });
 
+describe("AssistantPanel 默认修改目标（selectionContext）", () => {
+  const CHAPTER_A: SelectionContext = { kind: "chapter", workId: "w1", id: "c-a", title: "第一章", dirty: false };
+  const CHAPTER_B: SelectionContext = { kind: "chapter", workId: "w1", id: "c-b", title: "第二章", dirty: false };
+  const OTHER_WORK: SelectionContext = { kind: "chapter", workId: "w2", id: "c-x", title: "别书的章节", dirty: false };
+
+  function targetChip(): HTMLElement {
+    return screen.getByLabelText("当前修改目标");
+  }
+
+  it("没有选中对象时显示整本书·自由讨论，发送不追加任何上下文", async () => {
+    const user = userEvent.setup();
+    const send = vi.fn(async () => true);
+    renderPanel({ selectionContext: null, stream: streamState({ send }) });
+
+    expect(targetChip().textContent).toContain("默认修改当前选中");
+    expect(targetChip().textContent).toContain("整本书 · 自由讨论");
+    expect(screen.queryByText(/当前有未保存修改/)).toBeNull();
+
+    await user.type(textarea(), "随便聊聊");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(send).toHaveBeenCalledWith("随便聊聊"));
+  });
+
+  it("默认目标随当前选中切换，dirty 警告随之出现与消失", () => {
+    const base = panelProps({ selectionContext: CHAPTER_A });
+    const view = render(<AssistantPanel {...base} />);
+
+    expect(targetChip().textContent).toContain("第一章");
+    expect(screen.queryByText(/当前有未保存修改/)).toBeNull();
+
+    view.rerender(<AssistantPanel {...base} selectionContext={{ ...CHAPTER_B, dirty: true }} />);
+    expect(targetChip().textContent).toContain("第二章");
+    expect(screen.getByText(/当前有未保存修改/)).toBeDefined();
+  });
+
+  it("同作品的选中对象作为默认目标，发送时附加标识元数据但不附带正文", async () => {
+    const user = userEvent.setup();
+    const send = vi.fn(async (_payload: string) => true);
+    const contaminated = {
+      ...CHAPTER_A,
+      dirty: true,
+      text: "服务端已保存的正文-绝不应出现在消息里",
+      version: 5,
+    } as SelectionContext & Record<string, unknown>;
+    renderPanel({ selectionContext: contaminated, stream: streamState({ send }) });
+
+    expect(targetChip().textContent).toContain("第一章");
+    await user.type(textarea(), "把开头改得更有张力");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+
+    const payload = send.mock.calls[0]?.[0] as string;
+    expect(payload.startsWith("把开头改得更有张力")).toBe(true);
+    expect(payload).toContain("【当前选中对象】");
+    expect(payload).toContain('"id":"c-a"');
+    expect(payload).toContain('"title":"第一章"');
+    expect(payload).toContain('"dirty":true');
+    expect(payload).not.toContain("绝不应出现在消息里");
+    // 未保存草稿警告不等同于把草稿发出去。
+    expect(payload).toContain("未保存草稿未附带");
+  });
+
+  it("其他作品的选中对象被拒绝：不显示为目标，也不追加元数据", async () => {
+    const user = userEvent.setup();
+    const send = vi.fn(async () => true);
+    renderPanel({ workId: "w1", selectionContext: OTHER_WORK, stream: streamState({ send }) });
+
+    expect(targetChip().textContent).toContain("整本书 · 自由讨论");
+    expect(targetChip().textContent).not.toContain("别书的章节");
+
+    await user.type(textarea(), "聊点别的");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(send).toHaveBeenCalledWith("聊点别的"));
+  });
+
+  it("首条消息在创建会话前冻结目标：创建/连接期间切换选中不改变已捕获的 payload", async () => {
+    const user = userEvent.setup();
+    const send = vi.fn(async (_payload: string) => true);
+    let resolveCreate!: (value: string | null) => void;
+    const onCreateSession = vi.fn(
+      () => new Promise<string | null>((resolve) => { resolveCreate = resolve; }),
+    );
+    const base = panelProps({
+      sessions: [],
+      selectedSessionId: null,
+      selectionContext: CHAPTER_A,
+      onCreateSession,
+      stream: streamState({ sessionId: null, connected: false, send }),
+    });
+    const view = render(<AssistantPanel {...base} />);
+
+    await user.type(textarea(), "写第一章的开头");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(onCreateSession).toHaveBeenCalledTimes(1));
+
+    // 提交时立刻锁定：创建回包到达之前切章节，也不能把 chip 显示成另一个目标。
+    view.rerender(<AssistantPanel {...base} selectionContext={CHAPTER_B} />);
+    expect(targetChip().textContent).toContain("第一章");
+    expect(targetChip().textContent).not.toContain("第二章");
+    expect(targetChip().textContent).toContain("本条消息目标已锁定");
+
+    // 创建回包到达：首条消息冻结在提交瞬间的目标 A，chip 明确显示“已锁定”。
+    await act(async () => {
+      resolveCreate("s-new");
+      await Promise.resolve();
+    });
+    view.rerender(
+      <AssistantPanel
+        {...base}
+        selectionContext={CHAPTER_B}
+        selectedSessionId="s-new"
+        stream={streamState({ sessionId: "s-new", connected: false, send })}
+      />,
+    );
+    expect(targetChip().textContent).toContain("本条消息目标已锁定");
+    expect(targetChip().textContent).toContain("第一章");
+    expect(targetChip().textContent).not.toContain("第二章");
+
+    // 连接就绪后发送的是冻结的 payload A，而不是切换后的 B。
+    view.rerender(
+      <AssistantPanel
+        {...base}
+        selectionContext={CHAPTER_B}
+        selectedSessionId="s-new"
+        stream={streamState({ sessionId: "s-new", connected: true, send })}
+      />,
+    );
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const payload = send.mock.calls[0]?.[0] as string;
+    expect(payload).toContain('"id":"c-a"');
+    expect(payload).not.toContain('"id":"c-b"');
+  });
+
+  it("带目标发送失败时保留原始输入，不因附加了上下文而清空", async () => {
+    const user = userEvent.setup();
+    const send = vi.fn(async () => false);
+    renderPanel({ selectionContext: CHAPTER_A, stream: streamState({ send }) });
+
+    await user.type(textarea(), "没发出去的原稿");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(textarea().value).toBe("没发出去的原稿");
+  });
+});
+
 describe("AssistantPanel 安全渲染与持久状态（保留旧安全测试）", () => {
   it("模型输出中的 HTML 只按纯文本渲染，不会注入 DOM", () => {
     const { container } = renderPanel({
@@ -551,7 +698,7 @@ describe("AssistantPanel 安全渲染与持久状态（保留旧安全测试）"
         messages: [{ key: "delta-1", role: "assistant", text: "部分内容", streaming: true, createdAt: 0 }],
       },
     });
-    expect(screen.getByText("流式输出中（未落定）")).toBeDefined();
+    expect(screen.getByText("正在生成 · 尚未确认")).toBeDefined();
   });
 
   it("事件流断开时给出明确提示", () => {
