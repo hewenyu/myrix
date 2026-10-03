@@ -27,6 +27,7 @@ Myrix 是基于 DSH 的受治理 Agent 应用平台，当前交付为 **v0.1 持
 4. 涉及身份、授权、审计的改动，必须同步更新 `docs/adr/` 或在 PR 中说明为何不更新。
 5. 类型检查与测试是准入条件：`pnpm typecheck && pnpm test`。
 6. **本项目禁止 `chat/completions` 协议**：Cell、模型网关、上游调用、开发装配和验收不得使用该协议，不得保留兼容入口、隐式转换或失败回退。模型链路使用 OpenAI Responses（或显式实现并验证的 Messages）；必须有拒绝旧协议的回归测试。只读 vendor 中的上游实现与负例测试不属于启用该协议。
+7. **Subagent 派活优先考虑 DeepSeek，无法胜任时切换 Astra**：派发前用 `list_subagent_models` 查询当前渠道、模型及支持的推理强度，并在 `subagent` 调用中显式指定 `provider`、`model`，按任务需要选择 `reasoning_effort`；当 DeepSeek 不可用，或根据任务要求、执行结果判定其无法胜任时，切换到 Astra，并简要说明判定依据，不笼统回退到任意其他模型。当前已发现的 DeepSeek 路由为 `provider: "opencode-go"`、`model: "deepseek-v4.1-flash"`，支持 `low` / `high` / `max`；Astra 路由为 `provider: "openai"`、`model: "gpt-6-astra"`，支持 `low` / `medium` / `high` / `xhigh` / `max`（均以实时查询为准，不将目录发现视为调用成功验证）。
 
 ## 文档与 skills
 
