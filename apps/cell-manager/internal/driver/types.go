@@ -3,7 +3,7 @@
 
 // Package driver talks to the myrix-runtime-driver inside a cell process.
 //
-// The wire contract is defined by docs/plan/tech-design-v1.md §3.2. Paths are
+// The wire contract is defined by docs/implementation/runtime-driver.md. Paths are
 // real; whether a given deployment has a reachable driver behind them is a
 // deployment fact, not an assumption of this package. When the driver is
 // unreachable the controller fails closed: it never scales a cell down and

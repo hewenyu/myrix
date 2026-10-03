@@ -2,7 +2,7 @@
  * Locate the **locked** DSH installation used by every Myrix runtime PoC.
  *
  * There are three distinct installs in play and they must never be confused
- * (see `docs/implementation/runtime-poc.md` §1.1):
+ * (see `docs/development/runtime-dependencies.md`):
  *
  *   1. `vendor/deepseek-harness` (submodule, commit `639ed01`) — the read-only
  *      source baseline. Not runnable.
@@ -35,7 +35,7 @@ export const LOCKED_DSH_VERSION = '0.2.0-rc.2'
  * Resolution order: `MYRIX_DSH_CLI`, then `<repo>/tests/poc/.dsh-install`,
  * then an install reachable from the repo's own `node_modules`. It never
  * installs anything: a missing install fails loudly (see
- * `tests/poc/DEPENDENCIES.md`).
+ * `docs/development/runtime-dependencies.md`).
  *
  * @param {{ repo?: string, explicit?: string }} [options] - search overrides.
  * @returns {{ cli: string, version: string, nodeModules: string, root: string }} the resolved install.
@@ -72,7 +72,7 @@ export function resolveDshInstall(options = {}) {
     'myrix-poc: cannot find the locked DSH CLI.\n'
     + `Expected: ${join(pocInstall, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')}\n`
     + 'Install it once with: cd tests/poc/.dsh-install && pnpm install\n'
-    + '(see tests/poc/DEPENDENCIES.md; node-linker=hoisted + auto-install-peers=true are required)\n'
+    + '(see docs/development/runtime-dependencies.md; node-linker=hoisted + auto-install-peers=true are required)\n'
     + 'or point MYRIX_DSH_CLI at an @deepseek-ai/dsh/lib/bin.js.',
   )
 }

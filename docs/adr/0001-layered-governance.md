@@ -4,6 +4,12 @@
 - 日期：2026-09-30
 - 相关：ADR-0002（身份与插件授权）、[integration/dsh-seams.md](../integration/dsh-seams.md)
 
+> 现状注记（2026-10-02）：本 ADR 记录的 M0 形态使用 `@myrix/dsh-plugin-governance` 与
+> `packages/dsh-shim`；两者现为 **legacy**，不参与当前 Cell 装配。当前对应实现是
+> `myrix-policy-enforcer` / `myrix-principals` / `myrix-binding-lease` 等真实 Cordis 插件，
+> 见[集成入口](../integration/dsh-seams.md)与 [ADR-0016](0016-runtime-driver.md)。
+> 下面的 seam 路径与行号是锁定提交上的只读参照，升级时以源码为准。
+
 ## 背景
 
 DSH 原生提供三级沙箱权限（`read-only` / `workspace-write` / `danger-full-access`）与审批机制

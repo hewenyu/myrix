@@ -9,7 +9,7 @@
 
 真实验收（`tests/acceptance/session-lifecycle.mjs prepare`，真实 BFF + 两个隔离 Cell + 真实模型）发现：**初始订阅时，较快模型的回合其 user 持久事件会丢**。同一租户的作者侧能看到 `user`，而租户 2 的 JSONL 里已经落盘的 `seq=5 user/message` 在首次订阅的流里不存在 —— 网页重载后历史空白。
 
-证据（只读，不复制正文）：`data/cells/cell-dev-2/sessions/_no-cwd/e632d2b7-5552-4862-bfdf-5caa61fdf084/session.v4.jsonl` 第 7 行已有 `{"type":"user/message","seq":5,…}`，即"回合已提交"是事实，不是推断。
+历史证据：本地持久日志已有 `{"type":"user/message","seq":5,…}`，即“回合已提交”是事实，不是推断。实际会话 ID、文件路径与原始稿件仅本地留存；当前回归入口见下文测试，不要求读者持有私有日志。
 
 根因在 [runtime-router.ts:1006](<../../apps/bff/src/runtime-router.ts>)：
 

@@ -1,8 +1,9 @@
 # platform-store / works-service 实施记录
 
-状态：**已完成并通过真实 Postgres 测试**（2026-09-30）。
+状态：已实现；2026-09-30 的本地真实 Postgres 验收记录见 §五（**历史本地记录**，不构成当前版本的保证；
+当前验证方法与证据边界见 [验证方法](../testing/acceptance.md)）。
 相关：[ADR-0011](../adr/0011-postgres-ownership.md)、[ADR-0012](../adr/0012-platform-authorization.md)、
-[first-version.md](first-version.md)、[bff-api.md](bff-api.md)。
+[业务说明](../business.md)、[bff-api.md](bff-api.md)。
 
 ## 交付物
 
@@ -13,7 +14,7 @@
 | `packages/platform-store/src/index.ts` | **冻结给 BFF 的公开导出** |
 | `packages/platform-store/src/testing/index.ts` | 测试专用导出（`createTestAuthorizer` 只在这里） |
 | `packages/platform-store/src/bin/migrate.ts` `seed.ts` | 迁移 / 开发种子入口 |
-| `packages/platform-store/tests/` | 4 个测试文件、61 个用例（含 32 个真实 PG 集成用例 + 4 个迁移回归用例） |
+| `packages/platform-store/tests/` | 测试文件：真实 PG 集成、迁移回归、单元与授权接缝（具体用例数随代码演进，以 CI 为准） |
 | `apps/works-service/src/` | BFF 直接可用的小说创作用例层（wire 映射 + 错误映射） |
 | `apps/works-service/src/bin/smoke.ts` | 端到端冒烟（真实 `myrix_app` 连接） |
 
@@ -197,6 +198,9 @@ BFF 的 `/auth/dev-login` 只能把 `author|editor|other-tenant` 映射到上表
 全部在本机 `deploy/compose.dev.yml` 起的独立数据库上执行
 （`postgres://myrix_migrator:***@127.0.0.1:55439/myrix`，PostgreSQL 17.11，**未触碰其他数据库**）。
 
+以下命令与语义是 2026-09-30 的本地记录；用例数量随代码演进变化，此处不复述，当前门禁见
+[验证方法](../testing/acceptance.md)。
+
 ```text
 $ MYRIX_MIGRATE_DATABASE_URL='postgres://myrix_migrator:myrix_local_migrator@127.0.0.1:55439/myrix' \
     npx tsx packages/platform-store/src/bin/migrate.ts
@@ -224,12 +228,11 @@ app role: myrix_app
 app url : postgres://myrix_app:myrix_local_app@127.0.0.1:55439/myrix
 
 $ npx vitest run --config packages/platform-store/vitest.config.ts
-✓ tests/pg-integration.test.ts (32 tests)
-✓ tests/migrate.test.ts (4 tests)
-✓ tests/unit.test.ts (15 tests)
-✓ tests/authz-seam.test.ts (10 tests)
-Test Files  4 passed (4)
-     Tests  61 passed (61)
+✓ tests/pg-integration.test.ts
+✓ tests/migrate.test.ts
+✓ tests/unit.test.ts
+✓ tests/authz-seam.test.ts
+全部通过（用例数随代码演进，不复述旧数字）
 
 $ MYRIX_MIGRATE_DATABASE_URL=... npx tsx apps/works-service/src/bin/smoke.ts
 PASS  创建作品（owner=author）
@@ -253,7 +256,7 @@ PASS  跨租户映射成 404/403 且不泄漏细节
 PASS  错误体不含 SQL 片段
 PASS  会话列表默认不含已撤权会话
 
-smoke: 20 checks passed
+smoke: 全部检查通过（2026-09-30 本地记录）
 
 $ node（以 myrix_app 身份直连核对角色属性）
 connected as { current_user: 'myrix_app', current_database: 'myrix' }
@@ -299,8 +302,6 @@ migrations read denied: 42501                             ← myrix_internal 不
 
 ## 七、未完成 / 留给后续
 
-- 会话撤销后的 SSE 事件回放与 cell 侧通知投递逻辑在 cell 子代理范围（本包只提供
-  `outbox_messages` 的 claim/settle 与 `session.revoke` 的写入）。
-- `packages/contracts/src/platform.ts` 的 `MemberRole` 仍是 `admin | member`（Lead 的写入范围）；
-  `auditor` 已在本包与 SQL 中支持，wire 类型补齐后前端即可展示审计入口。
+- 会话 SSE 回放与 Cell 通知由[BFF运行时](<bff-runtime.md>)及 driver 承担；本包提供 outbox claim/settle 与撤权事务，不应重复实现传输逻辑。
+- 历史[contracts/platform.ts](<../../packages/contracts/src/platform.ts>)的 `MemberRole` 是 `admin | member`；当前存储/治理主线含 `auditor`，见[ADR0033](<../adr/0033-condition-malformed-and-role-partition.md>)。不能仅改旧类型就声称具备审计 UI。
 - 转让所有权、多人协作不在首版；`works` 没有 `owner` 之外的授权模型。

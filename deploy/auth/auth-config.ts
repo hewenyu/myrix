@@ -505,7 +505,7 @@ function renderNginxSite(input: {
   ];
 
   const preamble = [
-    "# 由 deploy/auth/auth-config.ts 生成；集成说明见 deploy/auth/README.md。",
+    "# 由 deploy/auth/auth-config.ts 生成；集成说明见 docs/deployment/authentication.md。",
     `# 不含真实域名默认值：站点名占位符为 ${DEFAULT_SITE_NAME}，集成前必须替换为真实 FQDN。`,
     "# 刻意关闭 access log：/api/v1/auth/callback 的查询串携带一次性 authorization code，",
     "# 访问日志会把令牌写进磁盘 —— 需要日志时请自行加脱敏方案，不要直接打开 access log。",

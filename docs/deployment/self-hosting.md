@@ -1,15 +1,15 @@
 # Myrix 单机 VPS 部署（Docker Compose + 宿主 Nginx + 同机 Keycloak）
 
-首版部署目标是一台 VPS，不是 Kubernetes。本目录提供**真正单机**的编排：
+首版部署目标是一台 VPS，不是 Kubernetes。部署编排提供**真正单机**的编排：
 一台 Postgres 17（持久卷）、四个 Myrix 运行镜像（BFF+works、模型网关、Cell、
 Keycloak）。**不使用 CellManager / Helm / Kubernetes**。
 
-- 编排：[compose.yml](compose.yml)（Keycloak 由 [../auth/compose.auth.yml](../auth/compose.auth.yml) 覆盖片段引入）
-- 初始化器：[init.mjs](init.mjs)（生成全部私有配置与一次性 SQL，不连数据库）
-- 备份/恢复：[backup.sh](backup.sh) / [restore.sh](restore.sh)
+- 编排：[compose.yml](<../../deploy/vps/compose.yml>)（Keycloak 由 [../auth/compose.auth.yml](<../../deploy/auth/compose.auth.yml>) 覆盖片段引入）
+- 初始化器：[init.mjs](<../../deploy/vps/init.mjs>)（生成全部私有配置与一次性 SQL，不连数据库）
+- 备份/恢复：[backup.sh](<../../deploy/vps/backup.sh>) / [restore.sh](<../../deploy/vps/restore.sh>)
 - 测试：`node --test tests/vps/*.test.mjs`
 
-**没有 Caddy**：TLS 终止与公网路由由**宿主上既有的 Nginx**负责，本目录不声明
+**没有 Caddy**：TLS 终止与公网路由由**宿主上既有的 Nginx**负责，部署编排不声明
 `caddy` 服务、不生成 Caddyfile、没有 `--profile tls` 分支。域名与证书同样由宿主
 既有流程管理，本仓库不申请、不覆盖、也不复制任何证书或私钥。
 
@@ -68,7 +68,7 @@ node deploy/vps/init.mjs \
   --gateway-image  docker.io/hewenyulucky/myrix:gateway-sha-<40hex> \
   --cell-image     docker.io/hewenyulucky/myrix:cell-sha-<40hex> \
   --keycloak-image docker.io/hewenyulucky/myrix:keycloak-sha-<40hex> \
-  --upstream-url https://api.example.com/v1/responses --upstream-model deepseek-flash \
+  --upstream-url https://api.example.com/v1/responses --upstream-model your-responses-model \
   --cells 1
 ```
 
@@ -80,7 +80,7 @@ node deploy/vps/init.mjs \
 2. 生成**随机且稳定**的 owner UUID（同时是 Keycloak 的 `sub` 与业务 `user_id`）、
    临时随机 owner 口令、OIDC client secret、Keycloak 库口令与 bootstrap admin 口令
    （默认用户名 `myrix-owner` / `myrix-admin`）——这些都不需要用户提供，也**不会打印**；
-3. 调用 [`deploy/auth/auth-config.ts`](../auth/auth-config.ts) 的 `createAuthConfig()`，
+3. 调用 [`deploy/auth/auth-config.ts`](<../../deploy/auth/auth-config.ts>) 的 `createAuthConfig()`，
    由它渲染 realm 导入 JSON、Keycloak `KC_*` 环境与宿主 Nginx 站点片段；
 4. 写 `.env`、`secrets/*.env`、`auth/keycloak.env`、`auth/realm-myrix.json`、
    `auth/nginx-myrix.conf`（全部 `0600`）与 `sql/*.sql`；
@@ -88,7 +88,7 @@ node deploy/vps/init.mjs \
    Cell 令牌和数据库口令，但 Keycloak 不会重新导入已有 realm，因而不是恢复或升级手段。
 
 生成的 `secrets/`、`auth/keycloak.env`、`auth/realm-myrix.json`、`.env` 与
-`sql/` 已被 [.gitignore](.gitignore) 忽略，绝不提交。
+`sql/` 已被 [.gitignore](<../../deploy/vps/.gitignore>) 忽略，绝不提交。
 
 ### 1.3 拉起
 
@@ -145,8 +145,8 @@ docker compose -f compose.yml -f ../auth/compose.auth.yml up -d --wait \
 
 1. `provision`：以超级用户建低权 LOGIN 与迁移角色、转移库 owner，并显式创建
    Keycloak 的**独立库**与低权角色（`sql/05_keycloak_db.sql`，不在迁移脚本里）；
-2. `migrate`：以迁移角色调 Lead 的 `deploy/images/migrate.mjs --target business,gateway`；
-3. `auth`：以迁移角色挂载执行 [`deploy/vps/migrate-auth.mjs`](migrate-auth.mjs)，
+2. `migrate`：以迁移角色调用 `deploy/images/migrate.mjs --target business,gateway`；
+3. `auth`：以迁移角色挂载执行 [`deploy/vps/migrate-auth.mjs`](<../../deploy/vps/migrate-auth.mjs>)，
    建 `myrix_auth` schema 并授权；
 4. `grants`：以迁移角色做低权授权、登记 Cell 凭据摘要、登记唯一 owner 主体
    （`myrix_auth.subjects` 里显式写入与 Keycloak `sub` 相同的 UUID）。
@@ -155,14 +155,14 @@ docker compose -f compose.yml -f ../auth/compose.auth.yml up -d --wait \
 Keycloak 显式等待 `postgres: service_healthy` 与 `provision: service_completed_successfully`。
 PostgreSQL 和四个运行服务均使用 `restart: unless-stopped`；一次性作业不自动重启。
 
-### 1.4 宿主 Nginx 集成（由 Lead 执行）
+### 1.4 宿主 Nginx 集成（由部署操作者执行）
 
 初始化器生成的站点片段在 `auth/nginx-myrix.conf`（snippet 模式：只有 `location`
 块，不含 `listen`/`ssl_certificate`/`server_name`/跳转）。它把 `/auth` 与 `/auth/`
 转到 `127.0.0.1:18080`，其余转到 `127.0.0.1:8787`，并把
 `/auth/admin`、`/auth/realms/master` 返回 404。
 
-集成步骤（**由 Lead 在维护窗口执行，不要覆盖既有其他站点**）：
+集成步骤（**由部署操作者在维护窗口执行，不要覆盖既有其他站点**）：
 
 1. **备份**：`cp -a /etc/nginx /root/nginx-backup-$(date +%F)`，并记录当前
    `nginx -T` 输出；
@@ -210,7 +210,7 @@ docker compose -f compose.yml -f ../auth/compose.auth.yml logs grants migrate
 `https://<DOMAIN>/auth/realms/myrix`（BFF 会拒绝不匹配的 issuer）；
 `authorization_endpoint` / `token_endpoint` / `jwks_uri` 也必须都在 `/auth/realms/myrix`
 之下，它们由同一个含 `/auth` 的 `KC_HOSTNAME` 基础 URL 推出（见
-[../auth/README.md](../auth/README.md) §3.1）。浏览器打开
+[认证装配 §2](<authentication.md#2-origin-与-issuer两个不同值>)）。浏览器打开
 `https://<DOMAIN>`，用 `myrix-owner` + 生成时的临时口令登录，首次登录会强制
 改密。**单机部署不使用开发登录**。
 
@@ -230,12 +230,9 @@ docker compose -f compose.yml -f ../auth/compose.auth.yml logs grants migrate
    架构都存在。
 4. **校验 SHA 镜像**：从 CI 日志/`GITHUB_STEP_SUMMARY` 取得四个组件的
    `@sha256:` 摘要或 `*-sha-<40hex>` tag，确认四个 tag 指向**同一个 commit**。
-5. **VPS 部署**：首次部署用初始化器生成配置；升级只更新 `.env` 的四个镜像引用，
-   保留所有原有身份和秘密，不重新运行初始化器。然后
-   `docker compose ... pull && docker compose ... up -d --wait`。
+5. **VPS 部署**：首次部署用初始化器生成配置；升级先确认变更范围、数据库兼容性和维护窗口，停写并完成[联合备份](<backup-restore.md>)。保留全部身份、秘密及既有挂载，不重跑初始化器。更新四个同 SHA 镜像引用并核验摘要；按 Keycloak/公开 issuer 先于 BFF 的顺序重建运行服务，防止意外重跑 provision/migrate/grants。需要迁移时先审查独立执行计划。
 
-回滚就是把四个 tag 换回上一个 SHA 并 `up -d`；数据库迁移**不可回退**，所以升级
-前必须先备份。
+回滚不是只换四个 tag：数据库迁移**不可自动回退**，必须先评估旧应用与现有 schema/数据的兼容性；涉及数据恢复时按恢复手册在隔离的空目标演练。保留旧发布目录，私密 bind mount 可能仍引用它们。
 
 ---
 
@@ -252,7 +249,7 @@ docker compose -f compose.yml -f ../auth/compose.auth.yml run --rm grants    # �
 docker compose -f compose.yml -f ../auth/compose.auth.yml up -d --wait bff gateway cell-1
 ```
 
-`auth` job 用 Node 24 剥离 `apps/bff/src/auth-store.ts` 的类型；`pg` 驱动是
+`auth` job 用镜像中的 `tsx` loader 加载 `apps/bff/src/auth-store.ts`；`pg` 驱动是
 **从声明它的 workspace 解析**的（`createRequire(<appRoot>/apps/bff/package.json)`），
 仓库根目录没有也不应有 `pg` 依赖。迁移文件一旦发布不可改写（记录内容摘要）；
 DDL 漂移会直接报错并要求新增迁移文件。绝不要把迁移连接串
@@ -263,7 +260,7 @@ DDL 漂移会直接报错并要求新增迁移文件。绝不要把迁移连接�
 ## 4. 备份与恢复
 
 完整维护窗口、空库/空卷前置条件、角色恢复与演练步骤见
-[备份与恢复操作手册](backup-restore.md)。这些脚本需要 Ubuntu 的 `sha256sum`。
+[备份与恢复操作手册](<backup-restore.md>)。这些脚本需要 Ubuntu 的 `sha256sum`。
 
 ```sh
 # 操作者先停本项目除 postgres 外的全部服务/作业，脚本不会代为停机。
@@ -289,7 +286,7 @@ sh deploy/vps/restore.sh /secure/backups/<UTC-timestamp>
 
 ---
 
-## 5. 首版限制：1 Cell / 1 tenant / 1 owner
+## 5. 首版初始化范围：1 Cell / 1 tenant / 1 owner
 
 `myrix_auth.subjects` 的主键是 `(issuer, subject)`：同一个 Keycloak 用户无法同时
 登记到两个租户——第二条 `insert ... on conflict` 会被唯一键吞掉。因此首版
@@ -297,7 +294,7 @@ bootstrap：
 
 - `--cells` 只接受 `1`；`--cells 2` 会**明确失败**，而不是生成一个只有第一个
   Cell 能登录的“伪多租户”部署；
-- 只有一个租户、一个 owner 主体。真正的多租户切换需要控制面补充显式入口
+- 初始化只创建一个租户、一个 owner 主体；同租户可由运维显式补员（见[认证装配](<authentication.md#6-身份预登记与补员>)），不需要重跑初始化。真正的多租户切换需要控制面补充显式入口
   （例如每租户独立 issuer，或把 `subjects` 改成允许一个 subject 多租户）。
 
 Cell 的契约与 K8s/镜像一致：UID/GID `65532`，`DSH_HOME=/var/lib/myrix/dsh-home`
@@ -329,14 +326,14 @@ Cell 的契约与 K8s/镜像一致：UID/GID `65532`，`DSH_HOME=/var/lib/myrix/
 
 ## 7. 已对齐的装配契约与生产验证边界
 
-1. **auth 工厂接口**：本目录通过 `createAuthConfig()` 消费
+1. **auth 工厂接口**：部署编排通过 `createAuthConfig()` 消费
    `deploy/auth/auth-config.ts`，合并后配置由真实 `docker compose config` 回归验证。
    生成器先检查全部目标、拒绝 symlink 和覆盖，再以 0600 独占创建；错误固定脱敏。
    它不防御恶意宿主 root，也不声称消除了同 UID 修改父目录的 TOCTOU。
 2. **镜像内路径契约**：`migrate` job 执行
    `node /app/deploy/images/migrate.mjs --target business,gateway`（`APP_ROOT=/app`，
-   镜像需带 workspace 源码）；`auth` job 把本目录的
-   [`migrate-auth.mjs`](migrate-auth.mjs) 只读挂到
+   镜像需带 workspace 源码）；`auth` job 把部署编排的
+   [`migrate-auth.mjs`](<../../deploy/vps/migrate-auth.mjs>) 只读挂到
    `/app/deploy/images/migrate-auth.mjs` 后执行，并从
    `apps/bff/package.json` 解析 `pg`。BFF 静态资源路径假定为
    `/app/apps/novel-web/dist`。
@@ -350,7 +347,7 @@ Cell 的契约与 K8s/镜像一致：UID/GID `65532`，`DSH_HOME=/var/lib/myrix/
    Cell `GET /v1/ready`。若镜像改了就绪语义需同步。
 6. **Cell 持久卷属主**：依赖镜像在 `/var/lib/myrix/dsh-home` 预创建 65532 属主；
    `Dockerfile.node` 的 `cell` target 已满足，但需在合并后的镜像上复核。
-7. **多租户切换**：见 §5，需要控制面设计，本目录不实现。
+7. **多租户切换**：见 §5，需要控制面设计，部署编排不实现。
 
 ---
 

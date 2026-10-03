@@ -25,4 +25,4 @@ node plugins/myrix-novel/tests/smoke/novel-cell-smoke.mjs
 
 ## 前置
 
-`tests/poc/.dsh-install` 必须已按 `docs/implementation/runtime-poc.md` 安装（缺失时脚本以退出码 2 明确报错，不会静默跳过）。
+`tests/poc/.dsh-install` 必须已按[运行时依赖](<../development/runtime-dependencies.md>)安装（缺失时脚本以退出码 2 明确报错，不会静默跳过）。

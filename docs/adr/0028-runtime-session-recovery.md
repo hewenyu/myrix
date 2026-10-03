@@ -7,7 +7,7 @@
 
 ## 背景
 
-Lead 实际重启整个 `pnpm dev` 之后，原 other-tenant 会话 `e632d2b7-5552-4862-bfdf-5caa61fdf084` 的订阅得到 502 `stream_unavailable`，
+历史本地验收重启整个 `pnpm dev` 之后，某个 other-tenant 会话的订阅得到 502 `stream_unavailable`（实际会话 ID 仅本地留存），
 driver 侧 403；后续 `send` 得到 409 `session_not_open`，并被 BFF **永久 `fail`**（用户消息丢失）。
 
 根因是"控制面绑定状态"与"cell 进程内状态"是两套事实：

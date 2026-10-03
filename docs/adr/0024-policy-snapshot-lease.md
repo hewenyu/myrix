@@ -56,4 +56,4 @@
 - [公开入口依赖生命周期](../../plugins/myrix-binding-lease/tests/activation-order.test.ts)：真实 Cordis 验证生产者延迟出现、并发激活、生产者卸载/重挂，以及显式 lease-only PoC 无此依赖；不再假定 profile 行顺序。
 - [生产策略部署决策](./0025-novel-deployment-policy.md)：生产 BFF 显式下发六工具、策略 rev 1、TTL 10 秒；生产 profile 强制 `requirePolicy: true`。这不是角色或作品授权的替代品。
 
-**不由本 ADR 推定通过**：真实上游模型工具回合、凭据轮换、K8s 装配；双 Cell 与真实开发栈的最终运行证据见 [v0.1 验收记录](../implementation/v0.1-acceptance.md)。
+**不由本 ADR 推定通过**：真实上游模型工具回合、凭据轮换、K8s 装配；双 Cell 与真实开发栈的验证方法与证据边界见[验证方法](../testing/acceptance.md)（早期 v0.1 验收记录已本地归档，见[文档维护、归档与脱密](../documentation-policy.md)）。

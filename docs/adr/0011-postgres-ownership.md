@@ -3,8 +3,8 @@
 - 状态：已接受（首版）
 - 日期：2026-09-30
 - 相关：ADR-0001（分层治理）、ADR-0012（平台授权纯函数）、ADR-0013（BFF 认证）、
-  [platform-plan-v2](../plan/platform-plan-v2.md) §3（会话路由）、D11（单一所有者）、
-  [tech-design-v1](../plan/tech-design-v1.md) §3.1/§3.5/§4.7、[first-version.md](../implementation/first-version.md)
+  [业务说明](../business.md)（写入语义与单一所有者）、[平台存储实现](../implementation/platform-store.md)。
+  原平台/技术草案与首版过程记录已于 2026-10-02 本地归档，见[文档维护、归档与脱密](../documentation-policy.md)。
 
 ## 背景
 

@@ -1,8 +1,9 @@
 # BFF 运行时路由、持久投递与事件投影
 
-依据：[platform-plan-v2 §3.1](../plan/platform-plan-v2.md)、[tech-design-v1 §3.1–3.3/§4.5/§4.7](../plan/tech-design-v1.md)、
-[runtime-driver.md §3](runtime-driver.md)（driver 的线契约）、[bff-api.md](bff-api.md)（浏览器契约）、ADR-0010（ES256 凭证）、
+依据：[runtime-driver.md](runtime-driver.md)（driver 的线契约）、[bff-api.md](bff-api.md)（浏览器契约）、
+[business.md](../business.md)（业务对象与授权链）、ADR-0010（ES256 凭证）、
 ADR-0019（Cell 活性租约）、ADR-0022（查回执凭证 / 一 Cell 一租户 / 外部错误安全原因）。
+原平台/技术草案与首版过程记录已于 2026-10-02 本地归档，见[文档维护、归档与脱密](../documentation-policy.md)。
 
 本文件描述 `apps/bff/src/runtime-*.ts`：真实 `RuntimeRouter`、Postgres 持久队列的投递循环、
 driver HTTP 客户端、SSE 白名单投影，以及 CLI 配置工厂与装配例子。
@@ -27,7 +28,7 @@ driver HTTP 客户端、SSE 白名单投影，以及 CLI 配置工厂与装配�
 
 ## 1. `RuntimeRouter` 的五个方法
 
-接口定义在 `apps/bff/src/ports.ts`。语义与 `docs/implementation/first-version.md` 的接口基线逐条对齐：
+接口定义在 [`apps/bff/src/ports.ts`](../../apps/bff/src/ports.ts)。语义与 [bff-api.md](bff-api.md) 的浏览器契约、[business.md](../business.md) 的业务对象与授权链对齐：
 **平台 `queued` 只表示 DB 持久入队；cell `accepted` 只表示 inbox + flush；回复只能从事件流观察。**
 
 | 方法 | 行为 | 失败语义 |
@@ -323,12 +324,12 @@ pnpm exec vitest run apps/bff/tests/runtime-router.test.ts apps/bff/tests/runtim
 
 | 项 | 状态 |
 |---|---|
-| 撤权时队列里未投递的命令 | **留在 `commands` 表**（不投递、不写 failed）：撤权事实已由 binding + outbox 表达。是否改为"同事务结算成 failed 便于运维视图"待 Lead 裁决 |
+| 撤权时队列里未投递的命令 | **留在 `commands` 表**（不投递、不写 failed）：撤权事实已由 binding + outbox 表达。是否改为"同事务结算成 failed 便于运维视图"待后续产品/运维设计决定 |
 | 动态 CellDirectory（读 CRD / 控制面放置表） | 未实现；接口已留好（`byId(cellId, expectedTenantId)` 必填租户），静态实现是首版装配 |
-| driver 侧 receipt 凭证的真实签名消费 | **Lead 范围**：driver 需按 `{op:'subscribe', cmd:'receipt-<id>', bh:sha256('')}` 消费签名、核对同六字段活性与回执记录 `sid`；unknown receipt / replay / 不同 sid 负例由 Lead 补齐 |
+| driver 侧 receipt 凭证的真实签名消费 | 已按 `{op:'subscribe', cmd:'receipt-<id>', bh:sha256('')}` 消费签名并核对活性与 `sid`；未知回执、重放与不同 sid 负例见[回执测试](<../../plugins/myrix-runtime-driver/tests/controller.test.ts>) |
 | `GET /v1/commands/:id` 的跨重启回执 | 回执表仍是进程内有界；404 只表示"本进程没有回执"，调用方按权威会话日志对账 |
 | `bootId` 缓存 | 每次投递都先 `GET /v1/ready`（正确但多一次往返）；`phase=Ready` 的缓存与失效策略待 Cell 管理器落地后再说 |
 | 控制面签名信封形式的 admin revoke | 客户端目前只发 service credential；driver 侧已支持签名信封，装配时可替换 |
 | 事件流的"按 seq 去重/断点续传"在 BFF 侧 | 由浏览器按 `Last-Event-ID` 触发、driver 侧补发；BFF 只做投影（`after` 透传为 `Last-Event-ID`） |
-| 真实 driver 进程的端到端（P1/P2） | 他人范围（`tests/poc/`）；本模块用明确假 driver 验证协议与失败语义 |
+| 真实 driver 进程的端到端（P1/P2） | 由独立 smoke / 验收脚本覆盖；本模块用明确假 driver 验证协议与失败语义，执行边界见[验收指南](<../testing/acceptance.md>) |
 | 多副本投递循环的吞吐/公平性 | 靠 `SKIP LOCKED` + 会话 advisory lock 保证不重复；未做压测 |

@@ -6,7 +6,7 @@
 # CellManager、Helm、K8s 不参与本编排。
 #
 # Keycloak 通过 `deploy/auth/compose.auth.yml` 覆盖片段引入（见该文件与
-# deploy/auth/README.md），因此**最终部署命令必须同时给出两个文件**：
+# docs/deployment/authentication.md），因此**最终部署命令必须同时给出两个文件**：
 #
 #   docker compose -f deploy/vps/compose.yml -f deploy/auth/compose.auth.yml up -d --wait
 #

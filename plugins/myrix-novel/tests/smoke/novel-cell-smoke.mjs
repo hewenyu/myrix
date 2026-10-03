@@ -38,7 +38,7 @@ const CLI = join(INSTALL, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'
 const BASE_BUNDLE = join(REPO, 'bundles', 'myrix-base')
 
 if (!existsSync(CLI)) {
-  process.stderr.write(`myrix-novel-smoke: 找不到锁定 DSH CLI：${CLI}\n先按 docs/implementation/runtime-poc.md 安装。\n`)
+  process.stderr.write(`myrix-novel-smoke: 找不到锁定 DSH CLI：${CLI}\n先按 docs/development/runtime-dependencies.md 安装。\n`)
   process.exit(2)
 }
 

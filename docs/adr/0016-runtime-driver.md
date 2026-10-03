@@ -2,19 +2,19 @@
 
 - 状态：已接受（首版实现）
 - 日期：2026-09-30
-- 相关：[platform-plan-v2](../plan/platform-plan-v2.md) §2.1/§3/§4.2/§5.1、[tech-design-v1](../plan/tech-design-v1.md) §3.1–§3.3/§4.1/§4.2、ADR-0002（身份与插件授权）、ADR-0010（授权凭证）、ADR-0012（平台授权）、ADR-0013（BFF 认证）
+- 相关：ADR-0002（身份与插件授权）、ADR-0010（授权凭证）、ADR-0012（平台授权）、ADR-0013（BFF 认证）、[业务说明](../business.md)、[架构](../architecture.md)。原平台/技术草案与其中的伪代码章节已于 2026-10-02 本地归档，见[文档维护、归档与脱密](../documentation-policy.md)
 - 实现：`plugins/myrix-runtime-driver/`、`plugins/myrix-principals/`、`plugins/myrix-policy-enforcer/`
 - 接口契约：[docs/implementation/runtime-driver.md](../implementation/runtime-driver.md)
 
 ## 背景
 
-平台决策 D1/D4 定下：按租户分 Runtime，一个 DSH 进程只服务一个租户；会话绑定由控制面写权威记录并签发授权凭证，Runtime 驱动在 Agent 创建事务内验证并安装身份。技术方案 §4.1/§4.2 给了伪代码。本 ADR 记录把这些伪代码落成**真实 Cordis 插件**时，做出的判断与取舍。
+原平台草案的 D1/D4 定下：按租户分 Runtime，一个 DSH 进程只服务一个租户；会话绑定由控制面写权威记录并签发授权凭证，Runtime 驱动在 Agent 创建事务内验证并安装身份；技术草案的驱动伪代码（已本地归档）也给了形状。本 ADR 记录把这些伪代码落成**真实 Cordis 插件**时，做出的判断与取舍。
 
 落地时面对四类具体问题：
 
-1. **伪代码里的 `M.*` 全部不存在。** `M.receiptStore`、`M.admissionGate`、`M.events`、`M.routes` 都是示意。仓库里此前只有 `packages/dsh-shim`——一份与真实 DSH API 不一致的占位类型（platform-plan-v2 §9 明确要求删除）。用 shim 或 mock 顶上，等于把"验证真实内核"变成"验证自己写的替身"。
+1. **伪代码里的 `M.*` 全部不存在。** `M.receiptStore`、`M.admissionGate`、`M.events`、`M.routes` 都是示意。仓库里此前只有 `packages/dsh-shim`——一份与真实 DSH API 不一致的占位类型（原平台草案已判定删除；草案本地归档，legacy 说明见 [legacy-dsh-shim](../integration/legacy-dsh-shim.md)）。用 shim 或 mock 顶上，等于把"验证真实内核"变成"验证自己写的替身"。
 
-2. **身份表不能做成每 Agent 一个服务。** platform-plan-v2 §3.4 已经警告：为每个 Agent 注册同名服务会在进程级冲突。身份查表只能是**一个进程内单例 + 一张表**。
+2. **身份表不能做成每 Agent 一个服务。** 原平台草案 §3.4 已经警告（草案本地归档）：为每个 Agent 注册同名服务会在进程级冲突。身份查表只能是**一个进程内单例 + 一张表**。
 
 3. **绑定 ≠ 仍然有效。** `WeakMap` 里的条目只证明"创建时这个人是谁"。成员被移除、角色变化、控制面失联之后，绑定还在。这中间的空隙必须显式堵上，否则 guard 会放行一个已经被停用的用户。
 
@@ -66,7 +66,7 @@ get(agent)     // 宽松：只看绑定 + 撤权。文档明确标注"不要用�
 - 判定必须**同步**（guard 在工具体之前同步调用），返回非 `true`（含 `undefined`、`false`）或抛错一律按失效处理。
 - driver 本身**不安装**活性判定：那是控制面心跳/绑定快照适配器的职责。这是一个显式的接线缺口，已写进实现文档的"尚未覆盖"表——**不接则一切工具调用被拒**。
 
-这不是过度设计：platform-plan-v2 §3.3 要求"撤权不只依赖凭证过期"，而凭证 TTL 只有 60s，成员被移除后到凭证过期之间必须有第二个判定点。
+这不是过度设计：原平台草案 §3.3 要求"撤权不只依赖凭证过期"（草案本地归档），而凭证 TTL 只有 60s，成员被移除后到凭证过期之间必须有第二个判定点。
 
 ### 5. PEP：同步 guard 兜底 + waterfall 一定 `next()`
 
@@ -76,7 +76,7 @@ get(agent)     // 宽松：只看绑定 + 撤权。文档明确标注"不要用�
 - **判定是纯函数** `admitTool(input)`，判定链固定有序：身份 → 静态 allowlist 未安装 → 不在 allowlist → 快照缺失 → 快照过期 → 租户不符 → 不在快照允许集。
 - **两个集合并集？不。取交集。** 快照只能收窄静态 allowlist，不能放宽（AGENTS.md 规则 2）。
 - **缺快照 = 拒绝**，而不是"回退到静态 allowlist"。网络失败、未下发、被撤下走同一条路径。
-- **`tools` 的 allowlist 恰好 6 个小说工具**（platform-plan-v2 §5.2），不含 shell/fs/net/jobs/goals/subagents 等任何泛能力。
+- **`tools` 的 allowlist 恰好 6 个小说工具**（原平台草案 §5.2，草案本地归档），不含 shell/fs/net/jobs/goals/subagents 等任何泛能力。
 - **不保存策略**：快照由外部持有者安装（`setPolicySnapshotHolder` / `policySnapshotHolderOf`），本插件只读、只翻译成拒绝。符合 AGENTS.md 对 `plugins/*` 的定位。
 
 ### 6. 回执在 `flush` 之后；`jti` 与 `commandId` 严格分离
@@ -208,7 +208,7 @@ interface Config {
 2. 补发历史（`seq > lastEventId`），历史来源优先是 DSH 权威会话日志（`session.snapshotEvents()`），缓冲只补日志里还没有的部分；
 3. 冲刷待发队列，按各自的 `seq` 水位去重。
 
-- 瞬态帧（`agent/assistant-stream`）**没有 `seq`**，只发给此刻连接的订阅者，不入缓冲、不补发（tech-design-v1 §3.3）。
+- 瞬态帧（`agent/assistant-stream`）**没有 `seq`**，只发给此刻连接的订阅者，不入缓冲、不补发（原技术草案 §3.3，草案本地归档）。
 - 缓冲出现空洞时先发 `myrix/truncated`，显式告知不连续，而不是给出一段有洞的流。
 - `Last-Event-ID` 解析从严：非数字/负数一律当"未声明"，不静默回退到 0。
 - **每请求与逐帧**都做撤权检查：准入回调返回 false 或抛错 → 立刻关闭连接（fail-closed）。
@@ -217,7 +217,7 @@ interface Config {
 
 **撤权**：身份失效 → 关闭该会话 SSE → `cancel({kind:'disposed'})` → `dispose()` → 从 live 表移除。
 
-顺序是安全属性（tech-design-v1 §2 A8）：身份先失效，在途工具立刻被 guard 拒绝；空闲 Agent 上 `cancel` 什么都不做，只有 `dispose` 会注销。
+顺序是安全属性（原技术草案 §2 A8，草案本地归档）：身份先失效，在途工具立刻被 guard 拒绝；空闲 Agent 上 `cancel` 什么都不做，只有 `dispose` 会注销。
 
 **排空**：关闭准入（单向，不再打开）→ 等在途命令结算 → 逐会话 `whenIdle` + inbox 空 + `flush` → 返回 `{drained:true, activeSessions:0, waitedMs}`。
 
@@ -246,11 +246,11 @@ Cell 管理器的 `Draining` 分支要求 `POST /v1/admin/drain` **与** `POST /
 
 | 方案 | 拒绝理由 |
 |---|---|
-| 继续用 `packages/dsh-shim` 的类型 | 与真实 DSH API 不一致（platform-plan-v2 §9 已判删除）；用它写出的驱动上线才发现类型对不上 |
+| 继续用 `packages/dsh-shim` 的类型 | 与真实 DSH API 不一致（原平台草案已判删除，草案本地归档）；用它写出的驱动上线才发现类型对不上 |
 | 用 mock/fake 端口替代真实 Cordis 装配 | 验证的是替身而不是内核。本实现的端口替身只用于**单元测试**，另有一组测试把插件通过真实 `ctx.plugin()` 加载并断言路由注册/卸载 |
-| 每 Agent 注册一个同名身份服务 | Cordis 服务名是进程级的，会冲突（platform-plan-v2 §3.4） |
+| 每 Agent 注册一个同名身份服务 | Cordis 服务名是进程级的，会冲突（原平台草案 §3.4） |
 | 身份表用 `Map<SessionId, Principal>` 且不清理 | 撤权后表还在；Agent 销毁后条目泄漏。改用 `WeakMap` 主键 + 显式反查索引 |
-| 绑定即视为有效（不做活性判定） | 成员被移除到凭证过期之间有窗口；platform-plan-v2 §3.3 要求第二判定点 |
+| 绑定即视为有效（不做活性判定） | 成员被移除到凭证过期之间有窗口；原平台草案 §3.3 要求第二判定点（草案本地归档） |
 | 活性缺失时默认放行 | 违反 AGENTS.md 规则 1；"配置漏了"必须与"拒绝"同向 |
 | guard 里发网络请求向控制面问策略 | `ctx.tools.guard` 只接受**同步**函数；异步判定会被静默丢弃或阻塞执行路径 |
 | 只注册 guard，不注册 waterfall（或反之） | guard 挡直接调用，waterfall 挡正常的模型调用；两者覆盖面不同，缺一有洞 |
@@ -265,8 +265,8 @@ Cell 管理器的 `Draining` 分支要求 `POST /v1/admin/drain` **与** `POST /
 | `/v1/admin/idle` 复用 drain（关准入再查询） | 查询空闲会把 cell 关掉，管理器再也无法"查完再决定是否缩容" |
 | idle 查询 `await whenIdle()` | 把只读查询变成阻塞，还会把仍在跑的长轮次当成已空闲 |
 | idle 缺 `Agent.status` 时假定空闲 | 违反 AGENTS.md 规则 1；无法证明空闲就是拒绝 |
-| 回执早于 `flush` | `accepted` 就不再承诺持久性；崩溃会丢已回执消息（tech-design-v1 §2 A8） |
-| 撤权时直接 `cancel` 不 `dispose` | 空闲 Agent 上 `cancel` 是 no-op，不会注销（tech-design-v1 §2 A8 明确指出） |
+| 回执早于 `flush` | `accepted` 就不再承诺持久性；崩溃会丢已回执消息（原技术草案 §2 A8，草案本地归档） |
+| 撤权时直接 `cancel` 不 `dispose` | 空闲 Agent 上 `cancel` 是 no-op，不会注销（原技术草案 §2 A8 明确指出） |
 | `drain` 不检查 inbox 就返回成功 | 缩零后未处理的输入会随进程消失；管理器拿到假证明就把副本数设为 0 |
 | admin 端点复用命令凭证 | drain/revoke/idle 的操作者是 Cell 管理器与控制面 outbox，不是会话所有者；语义不同，不能共用一个 claim 集 |
 | SSE 先读历史再挂订阅 | 中间到达的事件会丢，且无法被发现（静默丢事件） |
@@ -299,8 +299,7 @@ Cell 管理器的 `Draining` 分支要求 `POST /v1/admin/drain` **与** `POST /
 - `send` 的对账会在每次发送前多做一次 `stat`/`open(read)`（有界读全量事件）；这是拿一点延迟换"不重复 append"，作者认为方向正确，但真实负载下的成本需要实测。
 - SSE 重放缓冲有窗口（默认 2048 条/会话），超出后只能靠 DSH 会话日志补；缓冲与日志不一致时会发 `myrix/truncated`。
 - SSE 背压上界默认 1 MiB：客户端读得比我们写得慢时会被**主动断开**，由 `Last-Event-ID` 重连补发。这是有意的取舍（不丢事件、不吃内存），但慢客户端会看到更多重连。
-- 三个插件的 `package.json` 依赖指向 npm 上发布的精确版本，但根 workspace 目前 exclude `vendor`，**装配方式（npm 精确版本 vs 纳入 workspace）尚未由 Lead 定案**。本实现没有修改根 `pnpm-workspace.yaml` 或根 `tsconfig.json`。
-- 为让局部 `tsc` 可跑，我在 `node_modules/.dsh-types/` 下用 pnpm 装了一份精确版本的 DSH 类型（`.gitignore` 覆盖 `node_modules/`，不是交付物，也不影响其他人）。**在当前仓库状态下，纯 `pnpm install` 后 `npx tsc -p plugins/myrix-runtime-driver/tsconfig.json` 会报找不到 `@deepseek-ai/*`** —— 这是装配问题，不是代码问题；解法由 Lead 定（推荐：把 `@deepseek-ai/*` 精确版本写进根 `package.json`，DSH 依赖走 npm 而非 submodule）。
+- **2026-10-02 更正早期装配记录**：依赖已由各插件自己的 `package.json` 与根 lockfile 声明/锁定，运行 CLI 另有隔离安装；不再需要早期临时类型目录，不将 DSH 加入根 workspace。按[运行时依赖](<../development/runtime-dependencies.md>)执行 frozen install，保持 vendor 只读。
 - `sessionPersistence` 进入 `inject`：不装 `session-persistence-*` 后端的 profile 里，驱动**不会激活**（而不是"激活但无法对账"）。这是 fail-closed 的选择，但让装配多了一条硬前置。
 
 **未覆盖（明确列出，不宣称已解决）**
@@ -310,7 +309,7 @@ Cell 管理器的 `Draining` 分支要求 `POST /v1/admin/drain` **与** `POST /
 - `defaultProvider`/`defaultModel` 只覆盖"每 cell 一套默认路由"。按会话/按作品选择不同模型（WebUI 选择器切换）不在本批内 —— 那需要一条从控制面到 `agentOptions` 的授权通路，本轮只保证"生产装配有确定来源且缺失即拒绝"。
 - `create` 遇到磁盘已有会话时改走 `resume`，但这依赖 `sessionPersistence.stat` 可见；纯 create 与"上次 create 从未 flush"之间的边界（会话物理存在但从不 materialize）没有独立测试。
 - 真实模型 + 真实 JSONL 持久化下的组合验证（P1/P2）属于 `tests/poc/`（他人范围）。本实现的测试用行为替身覆盖编排语义，用真实 Cordis 组合覆盖装配面。
-- 控制面侧签发 subscribe/drain/idle/revoke（含签名信封格式）未实现——Lead 范围。
+- 早期分工不代表当前缺口：BFF 已签发 subscribe/receipt 凭证并接入静态 Cell。Kubernetes drain/idle 的凭据、连通性和真实集群验收仍是独立边界，见[Cell 管理器](<../implementation/cell-manager.md>)。
 - `myrix-llm-gateway`、`myrix-audit`、novel 工具、网关/作品服务配置不在本实现内。
 - 跨进程/多副本 cell 的 `jti` 分裂问题由部署模型（每 cell 一进程）回避，未在本层解决。
 - 未做真实 Postgres/JWKS 拉取；`keys` 由配置注入，拉取失败即拒绝一切命令（ADR-0010）。

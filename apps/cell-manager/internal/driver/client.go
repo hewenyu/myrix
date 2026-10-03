@@ -27,7 +27,7 @@ type Client interface {
 	IdleProof(ctx context.Context, ep Endpoint) (IdleProof, error)
 }
 
-// HTTPClient is the real driver client. Paths follow tech-design-v1 §3.2:
+// HTTPClient is the real driver client. See docs/implementation/runtime-driver.md:
 //
 //	GET  {base}/v1/ready
 //	POST {base}/v1/admin/drain

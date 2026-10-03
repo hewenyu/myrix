@@ -1,6 +1,6 @@
 # ADR-0017：小说工具的作品访问边界
 
-状态：HTTP/客户端边界已实现；真实运行时插件装配已实现并冒烟实测（`docs/implementation/novel-runtime.md`）；真实模型工具回合待完成；PostgreSQL 并发验收见 `docs/implementation/first-version.md`。
+状态：HTTP/客户端边界已实现；运行时插件装配已实现并有可复现冒烟（[novel-runtime.md](../implementation/novel-runtime.md)、[小说工具 smoke](../testing/novel-smoke.md)）。真实模型工具回合与 PostgreSQL 并发验收的方法与证据边界见[验证方法](../testing/acceptance.md)；历史本地通过记录不保证当前提交。
 
 ## 决策
 

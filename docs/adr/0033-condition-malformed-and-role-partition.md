@@ -135,5 +135,6 @@ Symbol 与任何字符串都不相等，从类型上消除这个碰撞面。
 
 - 本 ADR 不声称已通过上述任何测试。
 - 本 ADR 不改变 `authorizePlatform`（平台成员授权）的动作/角色白名单，也不改变 RLS 与 CAS。
-- 本 ADR 不覆盖 legacy 控制面的 HTTP 校验、不覆盖 `dsh-plugin-*` 的 Cordis shim 契约漂移（见复盘 §4.1 / §4.2）。
+- 本 ADR 不覆盖 legacy 控制面的 HTTP 校验、也不覆盖 legacy `dsh-plugin-*` / shim 的契约漂移
+  （见[模块评审](../reviews/module-boundaries-2026-10.md)与 [legacy shim 说明](../integration/legacy-dsh-shim.md)）。
 - 本 ADR 不改变模型链路协议（仓库仍禁止 `chat/completions`）。
