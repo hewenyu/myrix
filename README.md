@@ -1,71 +1,119 @@
 # Myrix
 
-> 基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的受治理 Agent 应用平台；当前交付是 **v0.1 小说创作工作台**。
+**面向小说创作的 AI 工作台，支持私有部署。**
 
-Myrix 将作品、大纲、章节、人物/设定/时间线与创作 Agent 放在一个工作台里。DSH 提供 Agent 运行时，Myrix 负责身份、授权、业务持久化、会话路由与模型计量；通过 Cordis 插件和 bundle 集成，**不修改上游核心**。
+[![CI](https://github.com/hewenyu/myrix/actions/workflows/docker.yml/badge.svg?branch=master)](https://github.com/hewenyu/myrix/actions/workflows/docker.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](<LICENSE>)
 
-## 在线演示
+[在线体验](https://br.zve.ccwu.cc) · [项目文档](<docs/README.md>) · [本地开发](<docs/implementation/local-development.md>) · [自行部署](<docs/deployment/self-hosting.md>)
 
-**体验入口：[https://br.zve.ccwu.cc](https://br.zve.ccwu.cc)**。这套线上实例是演示环境，不是生产数据托管服务。
+Myrix 将大纲、章节、人物设定与 AI 创作助手放在同一个工作台中，让构思、写作、修改和版本管理围绕作品展开。项目基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 构建，通过 Cordis 插件与 bundle 扩展 Agent 运行时，由 Myrix 管理身份认证、内容授权、持久化和模型用量。
 
-- **用户名：`myrix-demo`**
-- **密码：`Myrix-PnWj7g1xngAUZi-T-7a!`**
-- 权限：专用共享的**工作台管理员**；不是主机、数据库或 Keycloak 管理后台账号。这组凭据经维护者授权公开，不能用于其他环境。
-- 打开入口后选择登录，进入工作台，新建带自己标识的测试作品，保存大纲或章节，再在右栏直接对创作 Agent 说出需求（无需先选助手类型）。中栏已保存的正文默认阅读排版，点“编辑原文”进入编辑；当前选中的章节/大纲/设定就是默认修改目标，输入框上方的 target chip 会显示它，发送时只自动带上对象类型、ID、标题与“是否有未保存草稿”，**不发送正文**，助手会先读取最新已保存内容再按版本写入——所以请先保存正文再让 Agent 处理。章节与设定条目要先用界面新建，Agent 才能读取和修改；未保存草稿不会被自动发送。
-- **共享账号不提供访客间隔离**：同一账号的作品和会话可能被其他访客读取、修改或删除。不要上传个人信息、密钥、公司资料或未公开稿件；不要修改共享密码，不要批量调用模型。
-- 数据可能重置，服务与模型额度不保证持续可用；需要独立数据、稳定额度和自己的账号体系时请[自行部署](<docs/deployment/self-hosting.md>)。
-- 2026-10-02 的独立登录检查已用真实浏览器验证 HTTPS 首页、OIDC 密码登录、工作台可见、服务端管理员身份及作品列表 API；该次检查未调用线上模型、未创建作品、未重启服务。历史登录证据不等同于新版发布、模型全链路或灾备恢复验收。
+当前版本为 **v0.1**，聚焦小说创作场景。功能范围与后续计划见[业务说明](<docs/business.md>)和[路线图](<docs/roadmap.md>)。
 
-## 能做什么，不能据此推断什么
+## 核心功能
 
-| 当前能力 | 说明 |
+- **围绕作品组织内容**：书架管理作品，书内目录统一管理大纲、章节、人物、设定与时间线。
+- **阅读与编辑分离**：已保存正文默认以阅读排版展示，可切换到原文编辑；支持桌面专注模式和移动端分栏切换。
+- **结合当前内容协作**：一个创作助手处理构思与改稿，默认以当前选中的章节、大纲或设定为修改目标，无需手动复制上下文。
+- **保留修改与对话历史**：章节历史版本、显式版本冲突处理、持久会话及对话归档；冲突时保留本地草稿。
+- **可控的运行边界**：OIDC 登录、作品属主授权、PostgreSQL 行级安全、租户隔离的 Agent 运行时，以及统一模型网关与额度计量。
+
+助手通过工具读取**已保存内容**。未保存正文不会自动发送；需要处理草稿时，请先保存。章节和设定条目需先在界面中新建，再交给助手修改。
+
+## 在线体验
+
+访问 **[br.zve.ccwu.cc](https://br.zve.ccwu.cc)**，使用以下公开体验账号登录：
+
+| 用户名 | 密码 |
 | --- | --- |
-| 小说工作台 | 作品、大纲、章节及历史版本、人物/设定/时间线；显式版本冲突处理 |
-| 统一创作 Agent | 新对话无需选预设；六个小说工具在一个助手内先读再按版本写入，工具不能新建章节/设定，需先在界面建立；发送时自动携带当前选中对象的 ID/标题/dirty 元数据（不含正文），目标在发送瞬间冻结 |
-| 书架与三栏工作台 | 登录后进书架开书：左目录（大纲/章节/设定）、中栏阅读优先并可显式切换到编辑、右助手；输入框上方 target chip 常驻显示默认修改目标；窄屏切换三栏且保持挂载，桌面含专注写作；归档只整理历史、不撤权 |
-| 持久会话 | BFF 命令入队、租户 Cell 执行、SSE 重放、撤权与重启恢复机制 |
-| 安全与计量 | OIDC + Cookie/CSRF、单属主授权、PostgreSQL RLS、Responses 网关与额度账本 |
-| 部署 | 单台 VPS：Docker Compose + PostgreSQL + 同机 Keycloak + 已有宿主 Nginx |
+| `myrix-demo` | `Myrix-PnWj7g1xngAUZi-T-7a!` |
 
-企业知识库联邦、通用插件管理台是早期治理方向，不等于当前工作台已交付的功能。旧内存控制面/console 用 `pnpm dev:legacy` 启动，**不是**当前应用。Kubernetes CellManager/Helm 有实现，但不是当前演示部署或已验收的高可用方案。详见[业务说明](<docs/business.md>)、[架构](<docs/architecture.md>)与[验收边界](<docs/testing/acceptance.md>)。
+登录后新建作品与章节，保存正文，再向右侧助手提出修改要求。输入框上方会显示本条消息的默认修改目标。
 
-## 本地开发
+> **共享演示环境，请勿存放私密内容。** 同一账号下的作品和会话不隔离访客，其他人可能读取、修改或删除内容。该账号仅具有工作台管理员权限，不具有主机、数据库或 Keycloak 管理权限。请勿修改共享密码或批量调用模型；演示数据可能重置，服务和模型额度不保证持续可用。
 
-前提：Node.js **24 系列**（根包允许 `^22.19.0 || >=24.0.0`；本轮环境为 24.13.0）、pnpm **10.33.0**、Docker Compose v2。以下在仓库根目录执行，使用专用本地数据库，不能指向已有业务库。
+## 快速开始
+
+### 环境要求
+
+- Node.js **24**（推荐）与 pnpm **10.33.0**。
+- Docker Engine / Docker Desktop，包含 Docker Compose v2。
+- 支持 **OpenAI Responses** 的模型服务及 API key。Myrix 不支持 `chat/completions`，也不提供协议转换或回退。
+
+### 1. 获取代码并安装依赖
 
 ```bash
-git submodule update --init --recursive vendor/deepseek-harness
+git clone --recurse-submodules https://github.com/hewenyu/myrix.git
+cd myrix
 pnpm install --frozen-lockfile
 pnpm --dir tests/poc/.dsh-install install --frozen-lockfile
-
-# 显式初始化专用本地 PostgreSQL；这个固定口令仅用于 loopback 开发夹具
-docker compose -f deploy/compose.dev.yml up -d --wait postgres
-MYRIX_MIGRATE_DATABASE_URL='postgres://myrix_migrator:myrix_local_migrator@127.0.0.1:55439/myrix' pnpm setup:dev
-pnpm build:web
 ```
 
-从[配置模板](<.env.example>)创建仅本地的 `.env`（权限 `0600`），填入自己的 **Responses 完整端点、准确模型 ID、API key 和模型上下文容量**；示例域名不能直接调用。然后：
+DSH CLI 使用独立锁定的依赖安装，详见[运行时依赖](<docs/development/runtime-dependencies.md>)。
+
+### 2. 初始化本地数据库
+
+以下命令只用于专用本地开发数据库，不要指向已有业务库：
 
 ```bash
+docker compose -f deploy/compose.dev.yml up -d --wait postgres
+MYRIX_MIGRATE_DATABASE_URL='postgres://myrix_migrator:myrix_local_migrator@127.0.0.1:55439/myrix' pnpm setup:dev
+```
+
+这里的固定口令仅用于绑定在本机回环地址上的开发夹具，不适用于部署环境。
+
+### 3. 配置模型服务
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+按[配置模板](<.env.example>)填写 Responses **完整端点**、准确的模型 ID、API key 与模型上下文容量。模板中的域名和模型是占位符，必须替换；本地配置包含凭据，不应提交到版本库。
+
+### 4. 构建并启动
+
+```bash
+pnpm build:web
 pnpm dev
 ```
 
-打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)，使用本机开发登录。`pnpm dev` 启动 BFF/works、网关和两个隔离 Cell，**不会自动迁移或重置数据**。前端改动需要停止开发栈、重新 `pnpm build:web`、重启并刷新。完整操作、端口、启动失败处理见[本地开发指南](<docs/implementation/local-development.md>)。
+打开 **[http://127.0.0.1:8787](http://127.0.0.1:8787)**，选择本机开发身份登录。
 
-**模型链路禁止 `chat/completions`**，不提供兼容入口、转换或失败回退；已实现链路为 OpenAI Responses。缺模型密钥会显式失败，不以 mock 冒充在线模型。
+开发栈包含 BFF、模型网关与两个隔离的 Cell，启动不会自动迁移或重置数据。前端暂不提供热更新：修改后需停止开发栈、重新构建、再启动并刷新。端口、配置与排障说明见[本地开发指南](<docs/implementation/local-development.md>)。
+
+## 架构概览
+
+```mermaid
+flowchart LR
+    Web["小说工作台"] --> BFF["BFF / 作品服务"]
+    Auth["Keycloak · OIDC"] --> BFF
+    BFF --> DB[(PostgreSQL)]
+    BFF --> Cell["租户 Cell · DSH"]
+    Cell -->|小说工具| BFF
+    Cell --> Gateway["模型网关"]
+    Gateway -->|Responses| Model["上游模型服务"]
+    Gateway --> DB
+```
+
+- **工作台与 BFF**：浏览器只访问同源 BFF，由服务端处理认证、内容授权、版本控制和会话路由。
+- **租户 Cell**：独立运行 DSH 与 Myrix 白名单插件，通过受授权工具访问作品；不直接持有数据库凭据或上游模型密钥。
+- **存储与模型网关**：PostgreSQL 持久化业务数据，模型网关统一调用上游并记录额度与用量。
+
+主线入口位于 [novel-web](<apps/novel-web/>)、[BFF](<apps/bff/>)、[platform-store](<packages/platform-store/>) 和 [model-gateway](<apps/model-gateway/>)；Agent 扩展位于 [plugins](<plugins/>) 与 [myrix-base](<bundles/myrix-base/>)。组件边界和请求流程见[架构文档](<docs/architecture.md>)。
 
 ## 自行部署
 
-从[单机自部署指南](<docs/deployment/self-hosting.md>)开始；认证细节见[Keycloak / Nginx 装配](<docs/deployment/authentication.md>)，数据保护见[备份与恢复](<docs/deployment/backup-restore.md>)。
+当前部署方案为**单台 VPS + Docker Compose + PostgreSQL + Keycloak + 宿主 Nginx/TLS**。从[自部署指南](<docs/deployment/self-hosting.md>)开始，按需阅读[认证配置](<docs/deployment/authentication.md>)与[备份恢复](<docs/deployment/backup-restore.md>)。
 
-- 自备域名、既有 Nginx/TLS、Docker Compose 和已验证的 Responses 上游；不要复用演示账号或本地开发口令。
-- BFF、Gateway、Cell、Keycloak 四个镜像必须使用同一完整提交 SHA 的标签，不能混用版本或使用 `latest` 代替验收。
-- 初始化生成独立身份、密钥与数据库口令；真实配置、账号、备份和本机运维记录不提交 Git，不进入 Docker 构建上下文。
-- 升级前先停写备份；不得用重新初始化、删除卷或 `down -v` 代替升级/恢复。首次登录改密、真实模型回合和恢复必须在自己的环境验收。
+部署使用独立账号与密钥，不复用公开体验账号或开发口令。四个应用镜像应使用同一完整提交 SHA，并固定不可变摘要；升级前停写并联合备份数据库、Cell 数据与私有配置，不通过重新初始化或删除数据卷完成升级。
 
-公开指南可用于其他人的部署；**维护者这台演示实例的操作记录和部署 skill 仅保留本地**。
+早期治理 console、企业知识库联邦及 Kubernetes 路线不属于当前小说工作台的交付承诺；现有单机方案也不代表高可用部署。
 
-## 开发与质量门禁
+## 开发与贡献
+
+提交变更前请阅读[仓库约定](<AGENTS.md>)，执行以下检查：
 
 ```bash
 pnpm lint
@@ -75,30 +123,21 @@ pnpm test:ci
 pnpm build:web
 ```
 
-未配置专用测试数据库时，部分 PostgreSQL 集成测试会跳过；绿灯不能代替数据库、真实 DSH、浏览器、OIDC、公网模型及恢复验收。检查层级与命令见[验证指南](<docs/testing/acceptance.md>)。
+PostgreSQL 集成测试需要专用测试库；未配置时部分测试会跳过。浏览器、真实模型与部署恢复属于独立验收层级，运行方法见[验证指南](<docs/testing/acceptance.md>)。真实模型调用会产生费用。
 
-| 源码位置 | 职责 |
+DSH 上游通过只读子模块引入，扩展应使用 Cordis 插件、bundle 或 patch，不直接修改上游核心。项目提供业务、开发与 UI 设计 skills，使用方式见[skills 指南](<docs/development/skills.md>)；界面贡献遵循[UI 设计标准](<docs/development/ui-design.md>)。
+
+## 文档导航
+
+| 主题 | 入口 |
 | --- | --- |
-| [novel-web](<apps/novel-web/>) / [BFF](<apps/bff/>) | 工作台与同源 HTTP/SSE、认证、业务装配 |
-| [platform-store](<packages/platform-store/>) | 当前 BFF 使用的 PostgreSQL/RLS/CAS/命令队列；[works-service](<apps/works-service/>) 是另一路尚未统一的作品实现，不是当前部署入口 |
-| [governance](<packages/governance/>) / [contracts](<packages/contracts/>) | 无 I/O 的授权判定与共享契约 |
-| [plugins](<plugins/>) / [myrix-base](<bundles/myrix-base/>) | DSH 身份、授权执行、工具、模型适配与白名单装配 |
-| [model-gateway](<apps/model-gateway/>) | Responses、额度预占/真实用量结算与审计 |
-| [deploy](<deploy/>) / [cell-manager](<apps/cell-manager/>) | 单机部署脚本；另有 Kubernetes 实现 |
+| 产品与规划 | [业务说明](<docs/business.md>) · [路线图](<docs/roadmap.md>) |
+| 设计与实现 | [架构](<docs/architecture.md>) · [工作台实现](<docs/implementation/novel-web.md>) · [UI 设计](<docs/development/ui-design.md>) |
+| 开发与测试 | [本地开发](<docs/implementation/local-development.md>) · [运行时依赖](<docs/development/runtime-dependencies.md>) · [验证指南](<docs/testing/acceptance.md>) |
+| 部署与运维 | [自部署](<docs/deployment/self-hosting.md>) · [认证](<docs/deployment/authentication.md>) · [备份恢复](<docs/deployment/backup-restore.md>) |
 
-## 文档与项目 skills
+完整目录见[文档索引](<docs/README.md>)。
 
-**统一入口：[文档索引](<docs/README.md>)**。项目说明、开发、接口、测试、部署、ADR 和复盘统一在文档目录维护；旧草案与含现场证据的原始记录本地归档，不再当作当前规范。[文档与脱密规则](<docs/documentation-policy.md>)说明公开/本地边界及 Git 历史限制。
+## 许可证
 
-- [理解业务 skill](<.agents/skills/myrix-business/SKILL.md>)：梳理业务流程、权限、数据归属和需求影响。
-- [开发 skill](<.agents/skills/myrix-development/SKILL.md>)：定位模块、实现与测试、安全约束、文档同步。
-- [界面设计 skill](<.agents/skills/myrix-ui-design/SKILL.md>)：作者优先的 UX、信息分层、文本保真与安全 Markdown、设计令牌、响应式/专注模式、CAS 草稿安全与浏览器证据。
-- [工作台 UI 设计标准](<docs/development/ui-design.md>)：界面规范与当前实现状态表；“标准”与“实现状态”分开读，未验证的边界明确标注。
-- 本地部署 skill：仅维护者 checkout 提供，不随 clone 分发；公共部署知识以自部署指南为准。发现方式见[skills 指南](<docs/development/skills.md>)。
-- 贡献前阅读[仓库约定](<AGENTS.md>)；项目现状与优先级见[复盘](<docs/reviews/project-review-2026-10.md>)和[路线图](<docs/roadmap.md>)。
-
-## 上游与许可
-
-只读[上游子模块](<vendor/deepseek-harness/>)锁定 `639ed015397290b3745d163aafe02ffee4aa3f84`，运行 CLI 使用独立锁定的 npm `@deepseek-ai/dsh@0.2.0-rc.2`；同版本号不证明两份产物逐字节一致，详见[运行时依赖](<docs/development/runtime-dependencies.md>)。
-
-本仓库采用 **Apache-2.0**（[LICENSE](<LICENSE>)、[NOTICE](<NOTICE>)）；上游 DSH 为 [MIT](<https://github.com/hewenyu/deepseek-harness/blob/639ed015397290b3745d163aafe02ffee4aa3f84/LICENSE>)。分发时保留双方许可与版权声明，并标注修改；商标权不在授权范围内，不暗示上游官方背书。
+Myrix 采用 **Apache License 2.0**，详见 [LICENSE](<LICENSE>) 与 [NOTICE](<NOTICE>)。上游 DeepSeek Harness 采用 **MIT License**；分发时须保留相应许可与版权声明。本项目不代表上游官方背书。
