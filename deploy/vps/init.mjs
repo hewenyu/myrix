@@ -30,7 +30,7 @@
  * 的唯一键是 (issuer, subject)，同一 issuer/sub 向多个租户重复插入会被唯一键
  * 吞掉，因此 `--cells > 1` 被明确拒绝，而不是假装支持多租户切换。
  *
- * 用法见 deploy/vps/README.md；参数校验失败一律非零退出并只报变量名。
+ * 用法见 docs/deployment/self-hosting.md；参数校验失败一律非零退出并只报变量名。
  */
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, rmdir, rm, stat } from "node:fs/promises";
@@ -944,7 +944,7 @@ async function main() {
     + `  origin=${deployment.origin} cells=${deployment.cells.length} tenant=${deployment.owner.tenantId}\n`
     + `  issuer=${deployment.oidc.issuer} image-sha=${deployment.commitSha}\n`
     + `  已写入 ${envFiles.length} 个 env/秘密文件（0600）与 ${sqlFiles.length} 个一次性 SQL\n`
-    + "  未连接数据库、未部署、未打印任何秘密。下一步见 deploy/vps/README.md。\n",
+    + "  未连接数据库、未部署、未打印任何秘密。下一步见 docs/deployment/self-hosting.md。\n",
   );
 }
 

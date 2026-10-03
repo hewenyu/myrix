@@ -1,10 +1,10 @@
 # v0.1 本地开发与验收
 
-本文描述已通过本地首版验收的真实开发装配，不是历史内存控制面或模型 mock。Responses 六工具链路、双租户真实进程重启恢复、完整浏览器工作流与可见章节上下文 → 模型 → 编辑器闭环均已通过。**证据及生产部署等未验收边界见 [验收记录](<v0.1-acceptance.md>)；模块测试或单独的供应商探测不能替代整条链路验收。**
+本文描述当前持久化开发装配，不是历史内存控制面或模型 mock。历史首版记录不能作为当前提交的验收保证；验证层级、复现方法与未验收边界见[验收指南](<../testing/acceptance.md>)。模块测试或单独的供应商探测不能替代整条链路验收。
 
 ## 1. 前提与边界
 
-- Node.js 24（建议满足锁定 DSH 包声明的引擎要求）、pnpm 10.33.0、Docker Compose。
+- Node.js 24 系列（根包允许 `^22.19.0 || >=24.0.0`；本轮环境为 24.13.0）、pnpm 10.33.0、Docker Compose。
 - 上游源代码只读，锁定提交 `639ed015397290b3745d163aafe02ffee4aa3f84`。实际 CLI 使用 npm `@deepseek-ai/dsh@0.2.0-rc.2`；版本相同**不能证明** npm 产物与该提交逐字节一致。
 - PostgreSQL 17 仅绑定 `127.0.0.1:55439`，开发数据库为 `myrix`。不要使用本机其他 PostgreSQL 端口或既有业务数据库。
 - 浏览器入口为 `http://127.0.0.1:8787`。不能用 `localhost` 或别的 Origin 混用认证 Cookie/CSRF。
@@ -15,32 +15,33 @@
 在仓库根目录运行：
 
 ```bash
-pnpm install
-pnpm --dir tests/poc/.dsh-install install
+git submodule update --init --recursive vendor/deepseek-harness
+pnpm install --frozen-lockfile
+pnpm --dir tests/poc/.dsh-install install --frozen-lockfile
 
 docker compose -f deploy/compose.dev.yml up -d --wait postgres
 MYRIX_MIGRATE_DATABASE_URL='postgres://myrix_migrator:myrix_local_migrator@127.0.0.1:55439/myrix' pnpm setup:dev
 pnpm build:web
 ```
 
-锁定 CLI 安装的 hoisted/peer 设置见 [依赖清单](<../../tests/poc/DEPENDENCIES.md>)。开发装配和运行时 PoC 共用这份独立安装，但不能因此把 stub PoC 当成真实模型验收。
+锁定 CLI 安装的 hoisted/peer 设置见 [依赖清单](<../development/runtime-dependencies.md>)。开发装配和运行时 PoC 共用这份独立安装，但不能因此把 stub PoC 当成真实模型验收。
 
 `setup:dev` 是唯一显式执行迁移、种子身份和专用 LOGIN/Cell 凭据登记的开发入口。不要在开发栈运行中执行初始化。普通 `pnpm dev` 不需要、更不会运行迁移。
 
-初始化产生 [开发运行配置](<../../data/dev-runtime.json>)，文件权限必须为 `0600`。重复初始化复用其中的签名密钥、独立数据库 LOGIN 和两个 Cell 的令牌；目标数据库或权限不匹配则拒绝覆盖。不要手动删除此文件来“修复”已有数据：重新生成身份凭据不是数据恢复操作。
+初始化产生本地开发运行配置 `data/dev-runtime.json`（含密钥，不入库、不公开链接），文件权限必须为 `0600`。重复初始化复用其中的签名密钥、独立数据库 LOGIN 和两个 Cell 的令牌；目标数据库或权限不匹配则拒绝覆盖。不要手动删除此文件来“修复”已有数据：重新生成身份凭据不是数据恢复操作。
 
 ## 3. 模型配置：仅 Responses
 
 从 [配置模板](<../../.env.example>) 新建本地 `.env`，设置权限 `0600`，填入供应商密钥。不要提交该文件、在命令行参数中粘贴密钥或把密钥发给 Cell。
 
 ```dotenv
-MYRIX_GATEWAY_UPSTREAM_URL=https://api.apikey.fan/v1/responses
-MYRIX_GATEWAY_UPSTREAM_MODEL=deepseek-flash
+MYRIX_GATEWAY_UPSTREAM_URL=https://api.example.com/v1/responses
+MYRIX_GATEWAY_UPSTREAM_MODEL=your-responses-model
 MYRIX_GATEWAY_UPSTREAM_API_KEY=替换为自己的密钥
 MYRIX_MODEL_CONTEXT_WINDOW=65536
 ```
 
-可使用自己的供应商，但必须先验证其 Responses 接口、真实模型 ID 与上下文容量。上述 `deepseek-flash` 是服务公开的别名，单凭别名不能证明版本为 4.1。
+上述地址和模型是占位符，必须换成自己的供应商，并验证 Responses 接口、真实模型 ID 与上下文容量。模型别名不能独立证明底层模型的版本。
 
 两个 URL 的语义不同，不能互换：
 
@@ -51,7 +52,7 @@ MYRIX_MODEL_CONTEXT_WINDOW=65536
 
 **本项目不允许 `chat/completions`，没有兼容入口、协议转换或失败回退。** 路径错误会在配置校验或调用时显式失败。仅能列出模型、或另一个客户端能调用，不能证明该服务实现了 `/v1/responses`。
 
-目前已单独验证上述替代服务的非流式 Responses、流式 Responses 和一次 `get_outline({})` 函数调用：HTTP 200、`response.completed`、真实用量字段；仅 Bearer 认证即可。此记录不是 Myrix 全链路通过的证明。
+供应商探测应分别检查非流式、流式终态、函数调用和真实用量字段；单独的 HTTP 200 不是 Myrix 全链路通过的证明。历史供应商探测记录不公开分发，也不能替代你自己的上游验收。
 
 ## 4. 启停与数据归属
 
@@ -96,7 +97,7 @@ pnpm dev
 4. 中栏换章节**不会自动改写助手输入**，也不会自动发消息。换章节后应重新复制新上下文，检查输入中的作品和章节再提交。
 5. 工具完成后，干净编辑器从服务端刷新已保存正文与版本；如果本地已有未保存修改，会保留草稿并提示服务端有更新，不用模型回复正文直接替换编辑器。
 
-上述入口已接入源码并通过组件测试；最新构建及真实浏览器证明见 [验收记录](<v0.1-acceptance.md>)。
+上述入口已接入源码并通过组件测试；最新构建及真实浏览器证明见 [验收指南](<../testing/acceptance.md>)。
 
 ## 6. 自动检查与真实浏览器验收
 
@@ -113,7 +114,7 @@ pnpm test:browser
 MYRIX_ACCEPTANCE_MODEL=1 pnpm test:browser
 ```
 
-[浏览器验收脚本](<../../tests/acceptance/local-browser.mjs>) 用独立 Cookie jar 检查登录、创建作品、大纲保存/刷新持久化、双窗口 CAS 409 与草稿保留、章节正文及版本历史、人物/设定/时间线三类条目的创建修改检索，以及同租户非属主 403 和跨租户 404。实际成功范围及仍待验证事项见 [验收记录](<v0.1-acceptance.md>)。开启模型模式后，要求真实模型调用 `get_outline` / `update_outline`，等待非空持久助手正文与持久 `turn-end`，随后直接读取 BFF 数据确认保存；工具调用消息、空助手泡或助手声称“已保存”都不能替代这些证据。
+[浏览器验收脚本](<../../tests/acceptance/local-browser.mjs>) 用独立 Cookie jar 检查登录、创建作品、大纲保存/刷新持久化、双窗口 CAS 409 与草稿保留、章节正文及版本历史、人物/设定/时间线三类条目的创建修改检索，以及同租户非属主 403 和跨租户 404。实际成功范围及仍待验证事项见 [验收指南](<../testing/acceptance.md>)。开启模型模式后，要求真实模型调用 `get_outline` / `update_outline`，等待非空持久助手正文与持久 `turn-end`，随后直接读取 BFF 数据确认保存；工具调用消息、空助手泡或助手声称“已保存”都不能替代这些证据。
 
 结果和截图保存到 `data/acceptance/browser-*/`，不会保存 Cookie/浏览器 storageState、上游密钥或抓包文件。每次新建单独的验收作品并保留供检查，不删除已有业务作品。
 
@@ -129,7 +130,7 @@ MYRIX_GATEWAY_TEST_DATABASE_URL='postgres://myrix_migrator:myrix_local_migrator@
 pnpm test
 ```
 
-最终本地门禁为后端/插件 **1051** 项、前端 **181** 项，零跳过；不要以旧的阶段测试数字替代。
+以上连接仅示范专用本地夹具，账号和库必须事先按测试要求建立，不能据此假定初始化器已经创建它们。每次记录实际通过/失败/跳过数量；历史测试数字不作为当前门禁保证。
 
 ### 可见章节上下文的真实浏览器验收
 
@@ -167,4 +168,4 @@ MYRIX_ACCEPTANCE_MODEL=1 node tests/acceptance/session-lifecycle.mjs verify data
 
 生命周期脚本仅对明确的 `409 session_not_active` 和 `503 session_reopening` 进行有界退避，整个订阅仍受 180 秒期限约束；普通 503、403 或 502 必须失败，不能借重试掩盖故障。
 
-第二阶段要求两个 Cell 的 boot ID 均已改变，重放原来的用户/助手消息，使用旧游标续传新的模型回合，最后撤销全部验收会话并断言后续消息返回 410。单靠再次调用实时 API、浏览器刷新或伪造 boot ID 不能通过。报告不保存 Cookie、CSRF 值或模型密钥；当前实际通过状态以 [验收记录](<v0.1-acceptance.md>) 为准。
+第二阶段要求两个 Cell 的 boot ID 均已改变，重放原来的用户/助手消息，使用旧游标续传新的模型回合，最后撤销全部验收会话并断言后续消息返回 410。单靠再次调用实时 API、浏览器刷新或伪造 boot ID 不能通过。报告不保存 Cookie、CSRF 值或模型密钥；当前实际通过状态以 [验收指南](<../testing/acceptance.md>) 为准。

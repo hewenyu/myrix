@@ -1,6 +1,6 @@
 # Cell 管理器与 Helm 安全部署骨架（实施记录）
 
-依据：[ADR-0014](../adr/0014-cell-lifecycle.md)、[platform-plan-v2](../plan/platform-plan-v2.md) §2.2/§2.3、[tech-design-v1](../plan/tech-design-v1.md) §0/§3.2/§3.4/§4.6。
+依据：[ADR-0014](../adr/0014-cell-lifecycle.md)。原平台/技术草案已于 2026-10-02 本地归档（见[文档维护、归档与脱密](../documentation-policy.md)）。当前部署形态见[架构](../architecture.md)：单台 VPS 是现状，Kubernetes 属未证明上线的愿景。
 
 写入范围：`apps/cell-manager/**`、`deploy/helm/myrix/**`、`docs/adr/0014-cell-lifecycle.md`、本文件。未改动其它 deploy 文件、根配置与 `vendor/deepseek-harness`。
 
@@ -125,7 +125,7 @@ Body: {"wantRunning": true|false}
 → 202 {"cell":"...","wantRunning":true}
 ```
 
-token 为空时**服务器不启动**（fail closed）；未知路径 404、非 POST 405、缺字段 400、写入失败 409；比较用 `subtle.ConstantTimeCompare`。调用方是会话路由（BFF），路由自己不需要 K8s 权限——这正是 tech-design-v1 §4.6 的分工。
+token 为空时**服务器不启动**（fail closed）；未知路径 404、非 POST 405、缺字段 400、写入失败 409；比较用 `subtle.ConstantTimeCompare`。调用方是会话路由（BFF），路由自己不需要 K8s 权限——这正是原技术草案 §4.6 的分工（草案已本地归档）。
 
 ## 6. Helm chart
 
@@ -181,17 +181,9 @@ cp config/crd/myrix.io_tenantcells.yaml ../deploy/helm/myrix/crds/tenantcell-crd
 
 （本次用 controller-gen v0.19.0 生成。）
 
-### 本机环境事实
+### 验证环境边界
 
-| 工具 | 状态 |
-|---|---|
-| Go | go1.26.1 darwin/arm64，可用 |
-| docker | 存在 |
-| kubectl | 存在，但 `current-context` 未设置 → **没有可用集群** |
-| helm | **系统未安装**。为完成渲染验证，本次把 helm v3.17 与 controller-gen 装到 `/tmp/myrix-tools/bin`（未改动系统路径、未写入本仓库） |
-| 集群 | 无。envtest 需要下载 kube-apiserver/etcd 二进制，本次未执行 |
-
-因此 **没有做任何集群级验证**：没有 apply CRD、没有起 pod、没有跑故障演练、没有做缩容/唤醒的实机竞态。上文所有"已实现"仅指代码与渲染层面。
+历史验证仅覆盖 Go 测试和 Helm 渲染，**没有真实集群级验证**：未 apply CRD、未起 pod、未跑故障演练或缩容/唤醒的实机竞态。上文“已实现”仅指代码与渲染层面。本轮未重跑 Go/Helm/envtest；使用者须准备专用集群及兼容的 Go、Helm、kubectl 与 envtest 二进制，不能依赖维护者机器的临时工具路径。
 
 ### 负例清单（要求项 → 测试）
 
@@ -209,15 +201,12 @@ cp config/crd/myrix.io_tenantcells.yaml ../deploy/helm/myrix/crds/tenantcell-crd
 | 内部接口鉴权 | `TestDisabledWithoutToken`、`TestAuthorisationAndRouting`、`TestWriteFailureIsReported` |
 | chart 安全护栏 | `TestChartRefusesUnsafeValues`（7 个子例）、`TestChartRendersBothProfiles` |
 
-## 8. 需要 Lead 对齐 / 未完成
+## 8. 当前阻断项与未完成范围
 
-1. **驱动缺 `/v1/admin/idle`**（最高优先）。tech-design-v1 §3.2 只定义了 `/v1/admin/drain`。控制器要求 drain **和** idle 两份独立证据；驱动没实现前，共享档 cell 会停在 `Draining` 而不缩容。请裁决：
-   - (a) 驱动新增 `/v1/admin/idle`（`internal/driver.IdleProof` 的形状即契约）；或
-   - (b) 把空闲证明并入 drain 的响应，控制器改为只要求一份证据。
-   在裁决前不要放宽 `Decide` 的 `Draining` 分支——那等于用定时器替代证据。
+1. **drain/idle 已有 driver 端点，控制器凭据链未闭合**：[driver router](<../../plugins/myrix-runtime-driver/src/router.ts>)已实现两个认证端点；[Go客户端](<../../apps/cell-manager/internal/driver/client.go>)尚未携带相应凭据。不能把端点存在当作 Kubernetes 缩容可用；须补齐凭据与真实集群验证，不得放宽 `Draining` 的证据条件。
 2. **内部接口的真实路径已写进文档与 chart**（`/internal/v1/cells/{cell}/want-running`，Bearer token）。BFF 侧的调用、跨 namespace 的网络放行与凭证轮换尚未实现；`networkPolicy.cellManager.internalNamespaces` 是为此预留的开关。
 3. **每租户凭证 Secret 的写入方未定**：控制面渲染还是平台作业。当前只约定"每租户一个、`0400` 只读、缺失即不启动"。
-4. **内部接口 mTLS**：chart 支持 cert-manager 签发或自带 Secret，但管理器进程目前只监听明文 HTTP（`tls.enabled=true` 只挂载了证书，未在 `main.go` 里启用 TLS 监听）。生产启用前需要补这一步，或由 mesh 终止。
+4. **内部接口 TLS**：chart 支持 cert-manager 或自带 Secret；[main.go](<../../apps/cell-manager/cmd/cell-manager/main.go>)已支持证书/私钥参数和 HTTPS 监听，二者只填其一即拒绝启动。未提供时是明文 HTTP；服务端 TLS 不等于已验证双向认证，客户端证书校验、BFF 接线及真实网络边界仍须单独验收。
 5. **资源配额与密度参数**：`runtimeQuota` 默认关闭，等待 Phase 0 P6 实测数字，不预设。
 6. **节点级 mTLS 与冷启动指标**（P6）未测。
 7. **`spec.runtime.driverBaseURL` 的网格寻址**：默认走 pod IP + 端口；若改用 Service/mesh，需要通过该字段注入，尚未与 BFF/基础设施对齐命名。

@@ -1,13 +1,14 @@
 # ADR-0014：TenantCell 生命周期与 Cell 管理器
 
-状态：**实施中（2026-09-30）**。依据 [platform-plan-v2](../plan/platform-plan-v2.md) D1/D2/D3 与 §2.2、§2.3，以及 [tech-design-v1](../plan/tech-design-v1.md) §0、§3.4、§4.6。
+状态：**实施中（2026-09-30）**。依据原平台/技术草案的 D1/D2/D3 与生命周期/Runtime 分工；
+草案已于 2026-10-02 本地归档，见[文档维护、归档与脱密](../documentation-policy.md)。当前实现与部署形态见 [Cell 管理器](<../implementation/cell-manager.md>) 与[架构](../architecture.md)。
 实现：`apps/cell-manager/`；部署：`deploy/helm/myrix/`。
 
-本 ADR 只决定**生命周期归谁管、状态机怎么走、缩容凭什么发生、权限边界在哪**。会话绑定与授权凭证见 ADR 待写（tech-design-v1 §8.2），驱动协议见 §8.3。
+本 ADR 只决定**生命周期归谁管、状态机怎么走、缩容凭什么发生、权限边界在哪**。会话绑定与授权凭证见 [ADR-0010](0010-grant-es256.md)，驱动协议见 [ADR-0016](0016-runtime-driver.md)。
 
 ## 背景
 
-平台决策 D1/D2/D3 定了运行单元：**一个 Pod = 一个 DSH 进程 = 一个租户 = 一个 `DSH_HOME` = 一个 RWO 卷**。共享档空闲缩到零，独享档常驻。
+原平台草案的 D1/D2/D3 定了运行单元：**一个 Pod = 一个 DSH 进程 = 一个租户 = 一个 `DSH_HOME` = 一个 RWO 卷**。共享档空闲缩到零，独享档常驻。
 
 由此产生三个必须一次定清楚的工程问题：
 
@@ -83,7 +84,7 @@ dedicated: 常驻。控制器不会把它驱到 0；
 
 ### 5. 唤醒
 
-`wantRunning=true` 且 `/v1/ready` 返回 `bootId` 后，控制器把 `bootId` 写进 `status`；路由**只在 `phase=Ready` 且 `bootId` 与凭证一致时投递**。凭证在就绪之后才签发（tech-design-v1 §4.5/§4.7），所以排队期间不会过期。
+`wantRunning=true` 且 `/v1/ready` 返回 `bootId` 后，控制器把 `bootId` 写进 `status`；路由**只在 `phase=Ready` 且 `bootId` 与凭证一致时投递**。凭证在就绪之后才签发（原技术草案 §4.5/§4.7 的顺序；草案已本地归档），所以排队期间不会过期。
 
 唤醒单次有 `readyTimeoutSeconds` 上限，超时进 `Failed` 并 `wakeAttempts++`；达到 `maxWakeAttempts` 后停止重试，等新的 generation 或人工干预（`Failed` 期间 `RequeueAfter` 退到 60s，不打满 API server）。
 
@@ -148,7 +149,7 @@ cell 之间的互访没有被任何规则放行，因此被 default deny 覆盖�
 
 ## 未决 / 需要 Lead 对齐
 
-1. **驱动的 `/v1/admin/idle` 还不存在**。tech-design-v1 §3.2 只有 `/v1/admin/drain`。控制器要求 drain **和** idle 两份证据。在驱动实现这个端点之前，共享档 cell 会停在 `Draining` 而不是缩容——这是刻意的，但 Lead 需要决定：驱动补端点，还是把 `drain` 的语义扩展为包含空闲证明。接口形状已冻结在 `internal/driver.IdleProof`。
+1. **2026-10-02 状态更正**：driver 已实现 `/v1/admin/idle` 与 drain；尚缺 Go 客户端到 driver 的认证装配。控制器仍须拿到 drain **和** idle 两份证据，不能以计时器放宽。见[当前实现与阻断项](<../implementation/cell-manager.md>)。
 2. **每租户凭证 Secret 的写入方与内容**未定：控制面渲染、还是平台作业。当前只约定"每租户一个、以 0400 只读挂载、缺失即不启动"。
 3. **内部唤醒接口的 mTLS**：chart 支持 cert-manager 签发或 `cellManager.tls.secretName` 自带 Secret，管理器也能自持 HTTPS 监听（`--internal-tls-cert-file/--internal-tls-key-file`，由 chart 注入）；但会话路由侧的调用约定（跨 namespace、凭证轮换）还没与 BFF 对齐，默认仍是明文 HTTP。
 4. **资源配额与密度参数**来自 Phase 0 P6 实测，当前 chart 的 `runtimeQuota` 默认关闭，不预设数字。

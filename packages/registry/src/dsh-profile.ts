@@ -37,7 +37,7 @@ function indentBlock(block: string, spaces: number): string[] {
  * - 平台插件（myrix-*）用 insert 行挂载，config 由部署环境提供；
  * - 高风险功能若要"连代码都不加载"，应把它从 bundle 依赖里摘掉（packageJson 的 bundles 只列启用的 bundle）。
  *
- * 依据：DSH patch 语法与层序见 docs/integration/dsh-seams.md（原始证据 docs/research/dsh-seams-raw.md）。
+ * 依据：DSH patch 语法与层序见 docs/integration/dsh-seams.md（早期原始调研已本地归档）。
  */
 export function renderDshProfile(
   spec: ProfileSpec,

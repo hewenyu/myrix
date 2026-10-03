@@ -1,11 +1,13 @@
 # binding-lease：Cell 侧绑定租约（实现与接口契约）
 
-状态：**已实现并通过 70 项局部测试**（2026-09-30）。真实端到端（真实 DSH agent-loop + 真实作品服务）
-未验证，见 §9。
+状态：已实现；2026-09-30 做过本地局部测试（**历史本地记录**，不构成当前保证，
+用例数不再复述；当前验证方法与证据边界见 [验证方法](../testing/acceptance.md)）。真实端到端
+（真实 DSH agent-loop + 真实作品服务）见 §9。
 
-依据：[ADR-0019](../adr/0019-cell-binding-leases.md)、[tech-design-v1 §4.1/§4.2](../plan/tech-design-v1.md)、
-[platform-plan-v2 §3.1](../plan/platform-plan-v2.md)。DSH 锁定 `639ed015397290b3745d163aafe02ffee4aa3f84`
-（包版本 `0.2.0-rc.2`，`@deepseek-ai/cordis@4.0.4`）。
+依据：[ADR-0019](../adr/0019-cell-binding-leases.md)、[ADR-0024](../adr/0024-policy-snapshot-lease.md)、
+[ADR-0025](../adr/0025-novel-deployment-policy.md)。原平台/技术草案（含本节早期依赖的章节号）
+已于 2026-10-02 本地归档，见[文档维护、归档与脱密](../documentation-policy.md)；本文不再链接草案路径。
+DSH 锁定 `639ed015397290b3745d163aafe02ffee4aa3f84`（包版本 `0.2.0-rc.2`，`@deepseek-ai/cordis@4.0.4`）。
 
 ## 1. 为什么需要这个插件
 
@@ -54,7 +56,7 @@
 `refreshMs < ttlMs/2` 是硬约束而不是建议：若周期刷新追不上租约过期，表现会是
 "服务完全正常但工具时好时坏全拒"，把真正的失效淹没在噪声里。
 
-## 3. 服务面（Lead 的装配接口）
+## 3. 服务面（运行时装配接口）
 
 插件通过 `ctx.provide('bindingLease', runtime)` 暴露服务，类型 `BindingLease`：
 
@@ -81,7 +83,7 @@ interface BindingLease {
 - 峰值在途请求数 ≤ 2（当前 + 一次紧随其后），不会线性放大。
 - 卸载后调用返回 `{ installed: false, rejection: 'aborted' }`。
 
-## 4. 线协议（Lead 负责的 BFF 端点）
+## 4. 线协议（BFF 内部端点）
 
 请求：`GET {origin}{path}`，`Authorization: Bearer <Cell 服务 token>`，`Accept: application/json`。
 本插件只发这两个头，`redirect: 'manual'`，不计 cookie、不跟随重定向。
@@ -142,7 +144,7 @@ interface BindingLease {
    （同文件 `setupAndPublish` `:753-779`，其中 `:776` 先跑 setup commit、`:778` 才 publish）。
    因此这个 hook 确实是"被 await 的"，不是 fire-and-forget。
 
-2. **暴露 `refresh()` 服务**：Lead 若在自己的 driver `setup` 适配里刷新，
+2. **暴露 `refresh()` 服务**：调用方若在 driver `setup` 适配里刷新，
    `await ctx.bindingLease.refresh()` 同样安全（合并 + 幂等）。
 
 **残留窗口（诚实记录）**：`myrix-runtime-driver` 在 `setup` 回调**内部**就
@@ -151,7 +153,7 @@ interface BindingLease {
 本插件与 driver 现存的代码里没有这种路径（driver 的 `commit()` 只查撤权；
 第一个工具调用发生在发布并收到 `send` 之后）。方向是正确的：窗口内**拒绝**，
 不是放行。彻底消除需要 driver 侧改动（`setup` 内 `await principals.refreshLiveness()`），
-属于他人文件范围，本实现不碰。
+须同步评审 driver 生命周期，不能通过放宽活性判定解决。
 
 ## 6. 为什么缓存必须逐字段全比（不是只比 sid/rev）
 
@@ -180,30 +182,29 @@ interface BindingLease {
 - 默认定时器带 `unref()`：租约心跳不会阻止进程退出。
 - 不写盘、不生成身份、不持久化 token；只保留解析后的六元组，不保留原始响应字节。
 
-## 8. 测试（真实命令与结果）
+## 8. 测试覆盖
 
 ```bash
-npx tsc -p plugins/myrix-binding-lease/tsconfig.json      # 0 error
-npx vitest run plugins/myrix-binding-lease                # 4 files, 70 tests passed
+npx tsc -p plugins/myrix-binding-lease/tsconfig.json      # 类型检查
+npx vitest run plugins/myrix-binding-lease                # 局部测试
 ```
 
-| 文件 | 用例 | 覆盖 |
-|---|---|---|
-| `tests/config.test.ts` | 11 | origin 白名单（HTTPS / 显式回环 HTTP）、路径模板与编码、TTL/refresh 边界、token 不回显、`redact` |
-| `tests/snapshot.test.ts` | 14 | 解析拒绝面（跨 cell/租户、重复 sid、未知字段、>10,000 行）、六字段逐一不等、到期半开区间、请求开始时刻起算、替换而非合并 |
-| `tests/fetch.test.ts` | 8 | 只发两个头、`redirect: 'manual'`、3xx 拒绝、非 200 不回显正文、content-length 预检、流式超限即断、abort、错误不含 URL/token |
-| `tests/plugin.test.ts` | 37 | **真实 Cordis**：加载 + 首次刷新、周期替换、TTL 到期拒绝、8 类失败清空、撤权/停用成员移除、六字段换值拒绝、创建竞态、`agent/created` 真实 `ctx.serial` 刷新、并发合并（4/20 个调用方）、卸载（timer 清空 / abort / 无 unhandledRejection / 监听器移除）、`invalidate`、无 secret 泄漏、缺 `principals` 不激活、非法配置加载失败 |
+| 文件 | 覆盖 |
+|---|---|
+| [`tests/config.test.ts`](../../plugins/myrix-binding-lease/tests/config.test.ts) | origin 白名单（HTTPS / 显式回环 HTTP）、路径模板与编码、TTL/refresh 边界、token 不回显、`redact` |
+| [`tests/snapshot.test.ts`](../../plugins/myrix-binding-lease/tests/snapshot.test.ts) | 解析拒绝面（跨 cell/租户、重复 sid、未知字段、>10,000 行）、六字段逐一不等、到期半开区间、请求开始时刻起算、替换而非合并 |
+| [`tests/fetch.test.ts`](../../plugins/myrix-binding-lease/tests/fetch.test.ts) | 只发两个头、`redirect: 'manual'`、3xx 拒绝、非 200 不回显正文、content-length 预检、流式超限即断、abort、错误不含 URL/token |
+| [`tests/plugin.test.ts`](../../plugins/myrix-binding-lease/tests/plugin.test.ts) | **真实 Cordis**：加载 + 首次刷新、周期替换、TTL 到期拒绝、8 类失败清空、撤权/停用成员移除、六字段换值拒绝、创建竞态、`agent/created` 真实 `ctx.serial` 刷新、并发合并（4/20 个调用方）、卸载（timer 清空 / abort / 无 unhandledRejection / 监听器移除）、`invalidate`、无 secret 泄漏、缺 `principals` 不激活、非法配置加载失败 |
 
-时间相关的用例全部通过注入的**手动单调时钟**（`ManualClock`）与手动定时器
-（`ManualTimers`）驱动，不依赖 sleep。
+每个文件的用例数量随代码演进变化，不复述旧数字；结果以 CI 实际运行为准
+（[验证方法](../testing/acceptance.md)）。时间相关的用例全部通过注入的**手动单调时钟**（`ManualClock`）
+与手动定时器（`ManualTimers`）驱动，不依赖 sleep。
 
-## 9. 未验证 / 待 Lead 处理
+## 9. 未验证 / 待处理
 
 | 项 | 状态 |
 |---|---|
 | 真实 DSH agent-loop + 真实作品服务的端到端（新会话创建后首次工具调用） | **未验证**；本文仅验证到"`ctx.serial('agent/created', …)` 返回时缓存已就绪"这一层 |
 | `agent/created` 在真实 `agents.create()` 路径上的时序 | **已读源码核实**（§5 行号），但未在真实进程里跑过 |
-| BFF `/internal/v1/cells/:cellId/bindings` 的联调（真实 Postgres + 真实 Cell 凭据） | 未做；端点已在 `apps/bff/src/works-server.ts` 实现，需 Lead 装配 |
-| DSH 依赖在根 workspace 的正式引入方式 | 未做。本插件 `package.json` 写精确版本（`@deepseek-ai/cordis@4.0.4`、`@deepseek-ai/dsh-agent@0.2.0-rc.2`、`@myrix/principals@workspace:*`），局部 `tsc` 通过 `plugins/myrix-binding-lease/node_modules/` 里指向 `node_modules/.dsh-types/`（gitignored 的临时精确版本安装）的软链解析。**没有跑整仓 `pnpm install`、没有改 lockfile** —— 正式引入由 Lead 决定 |
-| 根 `npx tsc -p tsconfig.json` | **0 error**（全仓干净，含本插件） |
-| `npx vitest run` 全仓 | 43 passed / 2 failed；两处失败全部来自他人正在改的范围（`apps/model-gateway/tests/usage.test.ts`、`plugins/myrix-llm-gateway/tests/smoke.dsh.test.ts`），与本插件无关。本插件 4 个文件 70 项全通过 |
+| BFF `/internal/v1/cells/:cellId/bindings` 的联调（真实 Postgres + 真实 Cell 凭据） | 端点已在 [`apps/bff/src/works-server.ts`](../../apps/bff/src/works-server.ts) 实现；Cell 装配见 [cell.patch.yml](../../bundles/myrix-base/cell.patch.yml) |
+| DSH 依赖引入方式 | 各插件在自己的 `package.json` 写精确版本（`@deepseek-ai/cordis@4.0.4`、`@deepseek-ai/dsh-agent@0.2.0-rc.2`、`@myrix/principals@workspace:*`），由根 workspace + lockfile 解析，见[运行时依赖](../development/runtime-dependencies.md) |

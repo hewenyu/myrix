@@ -186,7 +186,7 @@ test("备份/恢复覆盖 Keycloak 独立库与 Cell 卷，且禁止 down -v 捷
     assert.doesNotMatch(commandLines(script), /\brm\s+-rf\b[\s\S]{0,40}volume/);
   }
   // README 里也必须明确禁止。
-  const readme = readFileSync(`${REPO}deploy/vps/README.md`, "utf8");
+  const readme = readFileSync(`${REPO}docs/deployment/self-hosting.md`, "utf8");
   assert.match(readme, /down -v/);
   assert.match(readme, /nginx -t/);
   assert.match(readme, /原样保留/);

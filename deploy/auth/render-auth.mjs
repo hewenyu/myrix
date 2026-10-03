@@ -17,7 +17,7 @@
  *
  * 用法：
  *   node deploy/auth/render-auth.mjs --out deploy/auth/generated
- *   （domain / 密钥 / owner / 镜像 等通过环境变量提供，见 deploy/auth/README.md）
+ *   （domain / 密钥 / owner / 镜像 等通过环境变量提供，见 docs/deployment/authentication.md）
  */
 import { closeSync, chmodSync, lstatSync, mkdirSync, openSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";

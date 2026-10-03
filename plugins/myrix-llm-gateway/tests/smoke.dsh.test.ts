@@ -14,7 +14,7 @@
  * profile 里的插件是**编译后的 ESM**，由仓库已有的 `esbuild` 现场编译（未新增任何
  * 依赖、未改 lockfile）。子进程因此是一个普通 Node 进程：不需要
  * `--experimental-transform-types`，也就不会有"测试用 TS 开关跑通、生产编译后行为
- * 不同"的假绿（见 `docs/implementation/runtime-poc.md` R20）。
+ * 不同"的假绿（见 `docs/development/runtime-dependencies.md` 的编译约束）。
  *
  * ## 进程边界（不把环境变量当传声筒）
  *
@@ -27,7 +27,7 @@
  * 每次运行用**独立的 fixture `$DSH_HOME`**（`mkdtemp`），并发/重跑互不干扰；
  * 等待以"子进程结束"或"看门狗报告写盘后主动退出"为界，而不是等一个猜出来的时长。
  *
- * 用法（`tests/poc/.dsh-install` 必须先装好，见 docs/implementation/runtime-poc.md）：
+ * 用法（`tests/poc/.dsh-install` 必须先装好，见 docs/development/runtime-dependencies.md）：
  *   pnpm vitest run plugins/myrix-llm-gateway/tests/smoke.dsh.test.ts
  *
  * 缺安装时测试会**显式失败**并说明怎么装，而不是静默跳过 —— 否则"没跑"会被
@@ -91,7 +91,7 @@ function resolveDshCli(): { cli: string; version: string; nodeModules: string } 
   throw new Error(
     'myrix-llm-gateway smoke: 找不到锁定版 DSH CLI。\n'
     + `期望位置：${join(INSTALL, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')}\n`
-    + '安装方式见 docs/implementation/runtime-poc.md §1（cd tests/poc/.dsh-install && pnpm install），'
+    + '安装方式见 docs/development/runtime-dependencies.md §1（cd tests/poc/.dsh-install && pnpm install --frozen-lockfile），'
     + '或用 MYRIX_DSH_CLI 指向 @deepseek-ai/dsh/lib/bin.js。',
   )
 }

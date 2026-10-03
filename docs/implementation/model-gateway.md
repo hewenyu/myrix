@@ -10,7 +10,7 @@
 - 决策与取舍：[ADR-0023](../adr/0023-responses-gateway.md)
 - 归因与额度：[ADR-0015](../adr/0015-model-accounting.md)
 - 上游边界：[ADR-0004](../adr/0004-llm-gateway-boundary.md)
-- 启动与配置：[apps/model-gateway/README.md](../../apps/model-gateway/README.md)
+- 启动与配置：[model-gateway-operations.md](model-gateway-operations.md)
 
 ## HTTP 接口
 
@@ -162,7 +162,7 @@ promptTokens? / completionTokens? / cachedTokens? / reasoningTokens? / latencyMs
 - 上游 4xx 正文与连接异常 message **一律不回显**（只回固定分类文案）。
 - 提前退出/超限/abort 时 **cancel** 上游响应流，不只是 `releaseLock()`。
 
-## 端口与装配（Lead 接入）
+## 端口与装配
 
 ```ts
 // 运行期协议与端口（不依赖 kysely/pg）
@@ -252,8 +252,9 @@ MYRIX_GATEWAY_TEST_DATABASE_URL=postgres://myrix_migrator:...@127.0.0.1:55439/my
 
 ## 未做（当前范围外）
 
-- **真实上游 `/v1/responses` 端到端验收**：尚未跑过（外部端点验证由 Lead 负责）。
-  BFF/开发装配、部署清单与 `plugins/myrix-llm-gateway` 的协议切换属其他任务范围。
+- **真实上游 `/v1/responses` 端到端验收**：需要部署环境与显式凭据，按
+  [验证方法](../testing/acceptance.md)单独执行；不要用本地 fixture 的成功推断上游可用性。
+  BFF/开发装配、部署清单与 `plugins/myrix-llm-gateway` 的协议切换见[集成入口](../integration/dsh-seams.md)。
 - 内容安全 / 提示词审计（ADR-0004 划给企业网关）。
 - 多上游、多供应商路由、按模型分账定价（当前单上游单模型，价格表未纳入）。
 - `unknown` 结算的冲正 UI（需要在管理后台提供对账入口）。

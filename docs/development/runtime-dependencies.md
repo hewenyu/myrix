@@ -1,11 +1,13 @@
-# Myrix Phase0 P1/P2 运行时 PoC 依赖清单
+# Myrix 当前运行时依赖
 
-本文件说明 PoC 与 v0.1 本地开发栈所共用的**独立锁定 DSH 安装**。
+本文件说明 Myrix 本地开发、Cell 白名单装配与 smoke 所共用的**独立锁定 DSH 运行时**，
+以及"哪些包装进机器、哪些包允许挂进 Cell"这两件事的区别。真实开发装配步骤见
+[本地开发指南](<../implementation/local-development.md>)；证据边界见
+[验证方法](<../testing/acceptance.md>)。（本文件替代早期的 Phase0/P1/P2 PoC 依赖清单。）
 
 `tests/poc/.dsh-install/` 不在 `pnpm-workspace.yaml` 的包列表内，必须单独安装。
 除 `tests/poc/**` smoke 外，当前 `pnpm dev` 也通过同一个 CLI 解析器使用此安装；
-业务包不会把整个 DSH 发布包混入自身的工作区依赖。真实开发装配步骤见
-[本地开发指南](<../../docs/implementation/local-development.md>)。
+业务包不会把整个 DSH 发布包混入自身的工作区依赖。
 
 ## 1. 运行时本体
 
@@ -16,17 +18,17 @@
 一条命令（在 `tests/poc/.dsh-install/` 下）：
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 ```
 
 `node-linker=hoisted` + `auto-install-peers=true` 是**必须的**，见
-`.dsh-install/.npmrc` 的注释：DSH 的 profile 解析器会遍历安装目录的依赖图，
+[隔离安装的 .npmrc](<../../tests/poc/.dsh-install/.npmrc>) 的注释：DSH 的 profile 解析器会遍历安装目录的依赖图，
 嵌套的 pnpm 布局会让 `@deepseek-ai/dsh-*` 的查找依赖虚拟 store 的哈希。
 
 ## 2. 白名单 bundle 实际用到的 DSH 包
 
 这些**不需要单独安装**：它们是 `@deepseek-ai/dsh` 的依赖闭包，由第 1 步一并装上。
-列出它们是为了让“白名单”可审计 —— `bundles/myrix-base/cordis.patch.yml`
+列出它们是为了让“白名单”可审计 —— [cordis.patch.yml](../../bundles/myrix-base/cordis.patch.yml)
 里的每一行 `name:` 都必须在下面出现。
 
 ### 行（row）插件：构成 Cordis 树
@@ -55,6 +57,11 @@ pnpm install
 | `scope-invariant` | `@deepseek-ai/dsh-scope/invariant` | scope 包的不变量伴侣 |
 | `agent-loop-invariant` | `@deepseek-ai/dsh-agent-loop/invariant` | agent-loop 包的不变量伴侣 |
 
+Cell 的第二层 patch（[cell.patch.yml](../../bundles/myrix-base/cell.patch.yml)）在此之上追加
+Myrix 自己的行（`@myrix/principals`、`@myrix/policy-enforcer`、`@myrix/binding-lease`、
+`@myrix/runtime-driver`、`@myrix/llm-gateway`、`@myrix/novel`）与 Cell HTTP 载体
+`@deepseek-ai/dsh-host-webserver`；行的职责见[与 DSH 的集成入口](../integration/dsh-seams.md)。
+
 ### 传递 peer / 服务定义包（不在 patch 里出现，但必须可解析）
 
 `@deepseek-ai/dsh-scope`、`@deepseek-ai/dsh-invariants`、
@@ -66,10 +73,11 @@ pnpm install
 `@deepseek-ai/cordis`、`@deepseek-ai/cordis-plugin-include`、
 `@deepseek-ai/cordis-plugin-loader`、`@deepseek-ai/cordis-plugin-group`。
 
-## 3. 明确不安装（白名单排除）
+## 3. 明确不装配（Cell 白名单排除）
 
-以下包**不在** bundle 里，PoC 会断言它们既没有挂载服务、也没有出现在
-`--dump-config` 输出中：
+“不装配”不等于“不下载”。以下包是 `@deepseek-ai/dsh` 依赖闭包的一部分，`pnpm install`
+仍会把它们下载到安装目录；**Cell 白名单不挂载它们的行**，装配断言它们既没有挂载服务、
+也没有出现在 `--dump-config` 输出中：
 
 `@deepseek-ai/dsh-base`（整体）、`dsh-tool-bash`、`dsh-tool-pwsh`、
 `dsh-tool-bash-persistent`、`dsh-tool-pwsh-persistent`、`dsh-terminal`、
@@ -87,14 +95,18 @@ pnpm install
 `dsh-agent-instructions`、`dsh-session-query-sqlite`、`dsh-plan-mode`、
 `dsh-permission-presets`、`dsh-shell-env`。
 
-> 注：这些包**仍然会被 `pnpm install` 下载**，因为它们是 `@deepseek-ai/dsh`
-> 的依赖闭包。白名单的作用是**不把它们挂进 Cordis 树**，不是不下载它们。
-> 生产镜像要真正瘦身，需要按 `cordis.patch.yml` 裁剪安装目录（Phase 0 之后再做）。
+其中 **skill 相关包（`dsh-skill` / `dsh-skill-filesystem` / `dsh-tool-skill`）在依赖闭包里，
+但 Myrix Cell 不启用它们**：Cell 的 Agent 没有 skill 工具，也没有 skill 文件系统。
+仓库为开发者维护的项目 skills（`myrix-business`、`myrix-development` 等，见
+[项目 skills](skills.md)）属于开发工具面，**不是 Cell 启用 skill**；新增或修改它们
+不改变 Cell 的工具面，也不得借此改动 Cell 已启用的工具或 skill 装配。
+
+> 生产镜像要真正瘦身，需要按 `cordis.patch.yml` 裁剪安装目录（当前范围外）。
 
 ## 4. 其它前提
 
 | 项 | 要求 |
 |---|---|
-| Node | `^22.19.0 \|\| >=24.0.0`（实测 `v24.13.0`；DSH 自带要求 24.18.1+，但 PoC 未用到需要更高版本的特性） |
-| 网络 | 第 1 步需要 npm registry 可访问；之后 PoC 全程离线（模型调用走本地 mock 适配器，不需要任何 API key） |
+| Node | 根 [package.json](../../package.json) `engines.node` = `^22.19.0 \|\| >=24.0.0`；本地实测 `v24.13.0` |
+| 网络 | 第 1 步需要 npm registry 可访问；smoke 使用本地替身、不需 API key。`pnpm dev` 的真实模型链路仍需要用户自己的 Responses 配置与密钥 |
 | 平台 | 实测 macOS arm64。`compression: none` 避免了 zstd native 依赖；如需 `zstd`，`dsh-session-persistence-jsonl` 会引入 `koffi` 与 `@deepseek-ai/node-addon-system` |

@@ -14,7 +14,7 @@
  *   * 脚本不创建/删除卷，不做 `down -v`，不自动解包配置归档，不吞错（无 `|| true`）。
  *
  * 不声称"真机恢复实测通过"：真实恢复验证需要 VPS + 真实镜像，见
- * deploy/vps/backup-restore.md。
+ * docs/deployment/backup-restore.md。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -4,7 +4,7 @@
 > 标注：**[实测]** = 本仓库测试真实跑出来的结果；**[源码]** = 只读对照
 > `vendor/deepseek-harness`（submodule 提交 `639ed015397290b3745d163aafe02ffee4aa3f84`，
 > 即 `@deepseek-ai/dsh@0.2.0-rc.2`）；**[未验证]** = 明确没做的事。
-> 本文不改 `tech-design-v1.md` 与 `platform-plan-v2.md` 的任何设计决策。
+> 本文不改既有 ADR 或当前设计文档的决策；协议决策见 [ADR-0023](../adr/0023-responses-gateway.md)。
 
 ---
 
@@ -21,7 +21,7 @@ OpenAI **Responses** 端点（`POST <baseURL>/responses`），并忠实翻译流
 
 ---
 
-## 1. 公开面（给 Lead 对接用）
+## 1. 公开接口
 
 | 项 | 值 |
 |---|---|
@@ -89,7 +89,7 @@ OpenAI **Responses** 端点（`POST <baseURL>/responses`），并忠实翻译流
 
 > 端点由适配器追加：`MYRIX_GATEWAY_URL=https://gw.internal/v1`
 > → `POST https://gw.internal/v1/responses`。
-> 本地联调 `http://127.0.0.1:3123/v1` → `POST http://127.0.0.1:3123/v1/responses`。
+> 本地网关示例 `http://127.0.0.1:8790/v1` → `POST http://127.0.0.1:8790/v1/responses`。
 
 装配方若在加载后才拿到令牌（例如 Secret 挂载晚于 profile 加载），可在自己的插件里
 `ctx.inject(['myrix-llm-gateway'], ...)` 之后调用 `apply()` 的返回值：
@@ -212,10 +212,10 @@ options.sessionId
 ## 4. 测试与证据
 
 ```bash
-# 单测 + 真实 DSH smoke（55 项）
+# 单测 + 真实 DSH smoke
 npx vitest run plugins/myrix-llm-gateway/tests
 
-# 只跑真实 DSH smoke（需要 tests/poc/.dsh-install，见 runtime-poc.md §1）
+# 只跑真实 DSH smoke（需要 `tests/poc/.dsh-install`，见[运行时依赖](../development/runtime-dependencies.md)）
 npx vitest run plugins/myrix-llm-gateway/tests/smoke.dsh.test.ts
 
 # 只跑本插件的类型检查
@@ -271,7 +271,7 @@ npx tsc -p plugins/myrix-llm-gateway/tsconfig.json
 1. **插件以编译后的 JS 进 profile。** 用仓库已有的 `esbuild` 现场编译成单文件 ESM
    （`@deepseek-ai/*` external，`@myrix/principals` 内联；未新增依赖、未改 lockfile）。
    子进程是普通 Node，**不再需要 `NODE_OPTIONS=--experimental-transform-types`** ——
-   也就没有"测试用 TS 开关跑通、生产编译后行为不同"的假绿（runtime-poc.md R20）。
+   也就没有"测试用 TS 开关跑通、生产编译后行为不同"的假绿（早期运行时 PoC 的教训 R20；PoC 记录已本地归档）。
 2. **私有 fixture `$DSH_HOME`。** 每个用例 `mkdtemp` 一个独立 home 并铺真实布局
    （`profiles/node_modules` symlink、profile 内 `node_modules/@myrix/*`），
    不碰机器上的 `~/.dsh`，并发/重跑不互相删报告。
@@ -285,8 +285,8 @@ npx tsc -p plugins/myrix-llm-gateway/tsconfig.json
 
 ## 5. 为什么没有复用 pinned DSH 的 openai 转换器
 
-`platform-plan` 的要求是"尽量复用官方 provider/adapter 的公开转换器，但如果公共 API 不允许
-安全注入 headers，就写明确且测试充分的 adapter"。核对 `vendor@639ed01` 的结果是**后一种**：
+早期平台草案（已本地归档）的要求是"尽量复用官方 provider/adapter 的公开转换器，但如果公共 API
+不允许安全注入 headers，就写明确且测试充分的 adapter"。核对 `vendor@639ed01` 的结果是**后一种**：
 
 | 候选 | 公开面 | 为什么不能直接用于本次需求 |
 |---|---|---|
@@ -310,9 +310,9 @@ npx tsc -p plugins/myrix-llm-gateway/tsconfig.json
 
 | 项 | 说明 |
 |---|---|
-| 真实模型网关（`apps/model-gateway` + Postgres）的 Responses 路由 | **本仓库快照里网关只有 `/v1/chat/completions`**，还没有 `/v1/responses`；因此真实网关联调会 404，直到网关侧补上该路由。本轮验证的是适配器侧（loopback fake + 真实 DSH） |
-| 观测到的 `http://127.0.0.1:3123/v1` 404 | 外部端点侧的排查由 Lead 负责；本适配器按用户要求请求 `<origin>/responses`，**没有**静默改回旧协议 |
-| 真实上游模型（DeepSeek/OpenAI Responses 端点） | 无 key，未跑；上游侧由网关的 smoke 单独覆盖 |
+| 真实模型网关（`apps/model-gateway` + Postgres）的 Responses 路由 | 当前已实现 `/v1/responses`，旧协议显式拒绝，见[网关](<model-gateway.md>)。本页早期适配器测试不等于真实网关验收 |
+| 上游错误 | 请求 `<origin>/responses`；上游404不得静默改协议。按[网关运维](<model-gateway-operations.md>)排查，不保留个人代理端点作为操作依据 |
+| 真实上游模型 | 本轮文档整理未调用；真实回合需用户自己的 Responses 配置与计费授权，按[验收指南](<../testing/acceptance.md>)单独执行 |
 | `temperature` / `stop` | 不发送（Responses 无 `stop`；`temperature` 不在白名单）。DSH agent loop 若设置 `temperature`，线协议上不会体现 |
 | 工具调用历史的 `fc_` item id | 回放只带 `call_id`/`name`/`arguments`（用户指定的形状），不合成 `fc_*` item id |
 | 推理回放 | 推理块不进入下一轮 `input`；无状态 Responses 的推理续接需要 `encrypted_content`，本适配器不持有 |
@@ -322,18 +322,9 @@ npx tsc -p plugins/myrix-llm-gateway/tsconfig.json
 | 每请求 `rev` 与网关绑定行严格一致 | 由网关侧校验；Cell 侧只保证"把 principals 里的 rev 如实送出"，**未**与真数据库对账 |
 | DSH 版本差异 | 一切结论以 submodule `639ed01` / `@deepseek-ai/dsh@0.2.0-rc.2` 为准；`0.1.x` 的适配器面不同 |
 
-### 6.1 给 Lead 的待办
+### 6.1 当前装配核对
 
-1. **网关侧补 `/v1/responses`**：请求体白名单
-   `{model,input,instructions?,tools?,max_output_tokens?,stream,store:false}`、SSE 事件
-   （`response.created`/`output_item.added`/`output_text.delta`/`function_call_arguments.*`/
-   `output_item.done`/`completed`/`incomplete`/`failed`/`error`）、
-   非流式 `output` 数组与 `usage` 形状见 §3。
-2. **令牌来源**：推荐 Secret → 环境变量 → `!!js process.env.MYRIX_CELL_TOKEN`；
-   若装载顺序不允许，请让 Cell 镜像在加载后用 `apply()` 的返回值注入。
-3. **`rev` 的来源**：本适配器用 `principals` 里的 `rev`。生产上该值由
-   `myrix-runtime-driver` 依据控制面凭证写入，因此**driver 必须保证**每次撤权都
-   同步更新绑定或直接 `revoke(sid, rev)`，否则适配器只会送出旧的 rev（网关会拒绝）。
-4. **本适配器之外的旧协议残留**：`tests/poc/lib/stubs.mjs` 的模型 stub 仍只答复
-   `/v1/chat/completions`，`bundles/myrix-base/cell.patch.yml` 的 `MYRIX_GATEWAY_URL`
-   语义也相应变化（现在应是 origin）。两处都不在本插件的所有权范围内，未改动。
+1. 网关、开发入口、Cell patch 与 [smoke 替身](<../../tests/poc/lib/stubs.mjs>)均已使用 Responses；旧路由只能作为拒绝负例，不是兼容入口。
+2. 令牌经私有环境配置注入；真实 [Cell patch](<../../bundles/myrix-base/cell.patch.yml>)是装配依据，不手工暴露令牌。
+3. `rev` 来自 principals，由 runtime-driver 根据可信凭证绑定；撤权必须更新绑定/撤权版本，网关再次查库核对。
+4. 当前静态门禁与线上验证范围见[验收指南](<../testing/acceptance.md>)。适配器 smoke 不等于真实模型调用或集群恢复。

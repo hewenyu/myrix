@@ -701,7 +701,7 @@ test("compose.auth.yml 参考片段不漂移：无 Caddy、不可变镜像、无
 });
 
 test("README 描述的接口与工厂输出一致（键名与路径）", () => {
-  const readme = readFileSync(new URL("../../deploy/auth/README.md", import.meta.url), "utf8");
+  const readme = readFileSync(new URL("../../docs/deployment/authentication.md", import.meta.url), "utf8");
   assert.match(readme, /deploy\/auth\/auth-config\.ts/);
   assert.match(readme, /nginxSite/);
   assert.match(readme, /keycloakPublicEnv/);

@@ -32,6 +32,8 @@
 # --- runtime state, private config and secrets ------------------------------
 # data/ holds local runtime state and Cell homes; .env holds secrets.
 data
+docs/local
+.agents/skills/myrix-deploy
 **/.env
 **/.env.*
 !**/.env.example

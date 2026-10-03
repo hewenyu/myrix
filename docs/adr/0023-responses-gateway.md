@@ -145,14 +145,13 @@
 
 - **破坏性变更**：旧调用方（若还有）会在 `/v1/chat/completions` 收到 404，必须迁移到
   `/v1/responses`；Cell 侧适配器与开发装配也必须同步（属其他任务范围）。
-- 上游必须是真正的 Responses 端点。**本仓库尚未对真实上游 `/v1/responses` 跑过端到端验收**
-  （外部端点验证由 Lead 负责）；当前全部证据来自 fixture 上游与真实 HTTP 冒烟。
+- 上游必须是真正的 Responses 端点。此 ADR 编写时的证据仅来自 fixture 上游与真实 HTTP 冒烟；后续本地真实模型记录属于历史证据，不代表当前公网演示验收。本轮未调用计费上游，边界见[验收指南](<../testing/acceptance.md>)。
 - `incomplete` 之后网关会补一个 `event: error`，因此客户端可能先看到终态事件再看到错误事件；
   这是"终态不是成功"的显式表达，客户端必须按错误处理。
 
 ## 验证范围
 
-自动化验证（`pnpm exec vitest run apps/model-gateway/tests`，110 项通过）：
+历史自动化验证（ADR 编写时记录，非本轮计数；`pnpm exec vitest run apps/model-gateway/tests`）：
 
 - **协议**（`protocol.test.ts`）：Responses 白名单；`store` 只能 false；四个状态类字段与四个
   归因类字段分别 400；`input` 三类项（message / function_call / function_call_output）校验；
@@ -173,5 +172,4 @@
 - **真实 HTTP 冒烟**（`scripts/smoke.ts`）：Responses 流式/非流式、旧协议 404、缺密钥 503、
   真实 usage 结算、客户端断开取消上游，13 项全通过。
 
-未覆盖 / 由他人补齐：真实上游 Responses 端点验收（Lead）；BFF/开发装配、部署清单与 Cell 侧
-适配器的协议切换（其他任务）；`plugins/**` 中残留的 chat 引用。
+2026-10-02 状态核对：BFF/开发装配、部署清单、Cell 适配器和 smoke 替身均已切换 Responses；旧协议只保留历史描述与拒绝负例。真实上游、部署重启和灾备必须另行授权与验收，不能由本页历史 fixture 结果推断。

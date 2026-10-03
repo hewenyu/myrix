@@ -1,7 +1,7 @@
 /**
  * 真实 RuntimeRouter：会话路由 + 持久队列投递循环 + 撤权 outbox 重试。
  *
- * 与 `docs/plan/tech-design-v1.md` §4.5/§4.7 的对应关系：
+ * 持久命令语义（见 `docs/implementation/bff-runtime.md`）：
  *
  *   `createSession`   绑定 + create 命令**同一事务**（`SessionsRepository.create`），
  *                     返回 `status: creating`；真正的激活发生在 create 命令拿到

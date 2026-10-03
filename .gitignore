@@ -9,9 +9,13 @@ build/
 coverage/
 *.tsbuildinfo
 
-# runtime state
+# runtime state and private documentation (never force-add)
 data/
 *.log
+/docs/local/
+/.agents/skills/myrix-deploy/
+/.team/
+/deploy/auth/generated/
 
 # env
 .env

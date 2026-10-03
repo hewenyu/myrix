@@ -12,10 +12,10 @@
  * it in-process would fight the harness we are testing.
  *
  * The DSH installation is located, in order, from `MYRIX_DSH_CLI`, then a
- * `node_modules/@deepseek-ai/dsh` reachable from this repo, then an
- * already-materialized install in `tests/poc/.dsh-install`. It never installs
+ * already-materialized install in `tests/poc/.dsh-install`, then
+ * `node_modules/@deepseek-ai/dsh` reachable from this repo. It never installs
  * anything: dependency installation is an explicit, reviewed step (see the
- * dependency list in `docs/implementation/runtime-poc.md`), so a missing
+ * dependency list in `docs/development/runtime-dependencies.md`), so a missing
  * install fails loudly instead of silently succeeding.
  *
  * Usage:
@@ -74,7 +74,7 @@ function resolveDshCli() {
   }
   throw new Error(
     'myrix-poc: cannot find the DSH CLI.\n'
-    + 'Install the locked runtime into tests/poc/.dsh-install (see docs/implementation/runtime-poc.md)\n'
+    + 'Install the locked runtime into tests/poc/.dsh-install (see docs/development/runtime-dependencies.md)\n'
     + 'or point MYRIX_DSH_CLI at an @deepseek-ai/dsh/lib/bin.js.',
   )
 }

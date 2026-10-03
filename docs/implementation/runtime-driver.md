@@ -1,8 +1,8 @@
 # Runtime Driver 实现与接口契约
 
-依据：[platform-plan-v2 §2.1/§3](../plan/platform-plan-v2.md)、[tech-design-v1 §3.2/§4.1](../plan/tech-design-v1.md)。DSH 锁定 `639ed015397290b3745d163aafe02ffee4aa3f84`（包版本 `0.2.0-rc.2`，`@deepseek-ai/cordis@4.0.4`）。
+依据：[ADR-0016](../adr/0016-runtime-driver.md)、[与 DSH 的集成入口](../integration/dsh-seams.md)、[业务说明](../business.md)。原平台/技术草案已于 2026-10-02 本地归档（见[文档维护、归档与脱密](../documentation-policy.md)）。DSH 锁定 `639ed015397290b3745d163aafe02ffee4aa3f84`（包版本 `0.2.0-rc.2`，`@deepseek-ai/cordis@4.0.4`）。
 
-本文件是 **Lead 装配 BFF/路由与 bundle 时的接口基线**：端点、请求体格式、principal service 方法、Config、以及"谁负责签发什么"。
+本文件是 **BFF/路由与 bundle 装配的接口基线**：端点、请求体格式、principal service 方法、Config、以及"谁负责签发什么"。
 
 ## 1. 交付物与写入边界
 
@@ -12,14 +12,12 @@
 | `plugins/myrix-principals/` | `ctx.principals`：Agent → 身份 绑定表（Service class plugin） |
 | `plugins/myrix-policy-enforcer/` | PEP：同步 guard + `tools/pre-execute` waterfall |
 
-本批三处窄修复只改 `plugins/myrix-runtime-driver/**`（`src/index.ts`、`src/router.ts`、`src/controller.ts`、`src/http.ts`、`tests/**`）与 `docs/adr/0016-runtime-driver.md`、本文件；未改 `plugins/myrix-principals/**`、`plugins/myrix-policy-enforcer/**`、`apps/bff/**`（Lead 正在写 `production.ts`）、`apps/cell-manager/**`、`vendor/**`、`bundles/**` 与根配置。
+当前 driver 已进入[Cell bundle](<../../bundles/myrix-base/cell.patch.yml>)，由 BFF 静态目录和内部 works 服务装配。本文保留接口契约，不用早期并行开发的个人写入范围描述产品状态；实际依赖见[运行时依赖](<../development/runtime-dependencies.md>)。
 
-未改动 `tests/poc/**`、`packages/**`（`@myrix/grant` 未动：不加"只校验不消费"的 API）、`packages/contracts/**`（他人范围）。
-
-## 2. 装配方式（Lead 需要做的）
+## 2. 装配方式
 
 ```yaml
-# bundles/myrix-base/cordis.patch.yml（示意，最终由 bundle owner 落盘）
+# 插件参数示意，不是可直接加载的 patch；真实行布局见 bundles/myrix-base/cell.patch.yml
 plugins:
   '@myrix/principals':        {}            # Service class，default export
   '@myrix/policy-enforcer':   { }           # function plugin
@@ -46,7 +44,7 @@ bundle 的测试专用接缝（`MYRIX_CELL_ROUTE_SEAM`），不是生产方案�
 
 加载顺序无关紧要（三者通过 Cordis 服务查找解耦）；但 `myrix-principals` 必须先于另外两个**激活**，否则它们的 `inject` 不满足、不会启动 —— 这是刻意的 fail-closed。
 
-**依赖路径**：`package.json` 里用的是真实包名与精确版本（`@deepseek-ai/dsh-agent@0.2.0-rc.2` 等）。根 workspace 目前 exclude `vendor`，因此需要在统一装配时由 Lead 决定 DSH 依赖的引入方式（npm 精确版本，或把 `vendor/deepseek-harness/vendor/*`、`packages/*` 纳入 workspace）。**本实现没有碰 `vendor` 与根 `pnpm-workspace.yaml`。**
+**依赖路径**：各插件 manifest 与 lockfile 声明真实 npm 包，运行 CLI 另行隔离安装；根 workspace 排除只读 vendor。执行[运行时依赖](<../development/runtime-dependencies.md>)中的 frozen install，不把上游加入根 workspace。
 
 ## 3. HTTP 端点
 
@@ -251,7 +249,7 @@ highWaterRev(sid): number
 stats(): { bound; live; revoked; denied; liveness }
 ```
 
-**活性判定的说明（Lead 需注意）**：驱动本身**不安装**活性判定。控制面心跳 / 绑定快照适配器必须在进程内调用 `setLiveness` 提供 `bindings`/`currentMember` 的当前状态；未安装时 `lookup` 一律返回 `liveness-unavailable`，即**任何工具调用都会被拒**。这是设计选择：无法证明仍然有效 = 拒绝。
+**活性判定的说明（默认拒绝）**：驱动本身**不安装**活性判定。控制面心跳 / 绑定快照适配器必须在进程内调用 `setLiveness` 提供 `bindings`/`currentMember` 的当前状态；未安装时 `lookup` 一律返回 `liveness-unavailable`，即**任何工具调用都会被拒**。这是设计选择：无法证明仍然有效 = 拒绝。
 
 ## 5. `myrix-runtime-driver` 的 Config
 
@@ -343,20 +341,20 @@ Cell 管理器要求 drain **与** idle 两份独立证据。驱动补上后者�
 - 拒绝时同样返回 **200**，但带精确 `rejectionCode` 与可读 `reason`。**200 不是 ack**：`noActiveTurns:false` 就是"没有证明空闲"。刻意不用非 2xx，因为 cell-manager 的 `HTTPClient` 把非 2xx 当作"驱动不可达"的硬错误，会把"忙"误判成 `DriverUnavailable` 而读不到拒绝码。
 - `generation` 不配就不出现（驱动看不到 K8s `metadata.generation`，不猜值）。
 
-## 8. 尚未覆盖 / 需要 Lead 或他人补齐
+## 8. 装配状态与未覆盖范围
 
 | 项 | 状态 |
 |---|---|
-| `@myrix/runtime-driver` 等包在根 workspace 的装配（依赖解析） | 未做；需 Lead 决定 vendor/npm 引入方式 |
-| bundle `myrix-base` 的 plugin 白名单与 Config 落盘 | 他人范围（bundle owner） |
-| 控制面侧签发 subscribe 凭证 / **回执读取凭证（`receipt-<id>`，§3.5）** / drain / idle / revoke 信封 | Lead（BFF/contracts）；驱动侧协议已冻结并实现，BFF 侧由 `apps/bff` 按 §3.5 落盘 |
-| `POST /v1/admin/idle` 与 cell-manager 的接线 | 驱动端点已实现（形状与 `internal/driver.IdleProof` 一致）。cell-manager 侧 `Client.IdleProof` 已在，**本次未改 apps/cell-manager**（他人范围）；生成器字段 `generation` 需要显式配置才出现 |
+| `@myrix/runtime-driver` 等包的依赖解析 | 已由各 workspace manifest 与 lockfile 声明；vendor 保持只读，运行 CLI 单独锁定 |
+| bundle `myrix-base` 的 plugin 白名单与 Config 落盘 | 已实现，见[Cell patch](<../../bundles/myrix-base/cell.patch.yml>) |
+| 控制面侧签发 subscribe 凭证 / **回执读取凭证（`receipt-<id>`，§3.5）** / drain / idle / revoke 信封 | BFF 已实现 subscribe/receipt 签发，见[BFF运行时](<bff-runtime.md>)；Kubernetes drain/idle 凭据仍须单独补齐 |
+| `POST /v1/admin/idle` 与 cell-manager 的接线 | 驱动端点已实现（形状与 `internal/driver.IdleProof` 一致）。cell-manager 侧 `Client.IdleProof` 已在但凭据链未闭合；生成器字段 `generation` 需要显式配置才出现 |
 | 控制面心跳 → `principals.setLiveness` 适配器 | 由 `plugins/myrix-binding-lease` 提供（`GET /internal/v1/cells/:cellId/bindings` 短租约）+ 驱动打开前的 `refreshIdentity`（**检查 `installed === true`**，失败即中止打开）。**不接则一切工具调用被拒** |
 | `GET /v1/commands/:id` 的凭证验签 | **已做**：控制面为每次读取单独签 `op=subscribe` / `cmd=receipt-<id>` / `bh=sha256("")` 的新凭证（新 `jti`）；驱动走 `authorizeReceipt` 真实验签 + 一次性消费 + 撤权 + 六字段身份核对，且只在该回执属于凭证 sid 时返回。详见 §3.5 |
-| 真实进程 kill -9 / 真实 JSONL torn tail | **未覆盖**。重启对账用"共享内存 disk + 新建 runtime"模拟；真实闭环由 Lead 验证 |
-| DSH 类型依赖的本地解析 | 我用 `node_modules/.dsh-types/`（gitignored 的临时 pnpm 安装，`@deepseek-ai/*@0.2.0-rc.2` + `cordis@4.0.4` + `schemastery@3.18.4`）让局部 tsc 可跑。**它不是交付物**；`pnpm install` 后需由 Lead 决定 DSH 依赖的正式引入方式 |
-| 真实模型/JSONL 持久化下的组合验证（P1/P2） | 他人范围（`tests/poc/`） |
-| `myrix-llm-gateway`、`myrix-audit`、novel 工具 | 其他代理 |
+| 真实进程 kill -9 / 真实 JSONL torn tail | **未覆盖**。重启对账用"共享内存 disk + 新建 runtime"模拟；真实崩溃恢复须单独验收 |
+| DSH 类型依赖的本地解析 | 按[运行时依赖](<../development/runtime-dependencies.md>)执行 frozen install；早期临时类型安装不再是前置 |
+| 真实模型/JSONL 持久化下的组合验证 | 按[分层验收](<../testing/acceptance.md>)区分 stub、模型与恢复，不能由单元测试推断 |
+| 网关、小说工具与审计 | 网关/novel 已装配，审计由平台存储负责；不存在需要部署的 `myrix-audit` 插件行 |
 | 网关/作品服务配置 | 领域工具负责，本实现不含 |
 
 ## 9. 本地验证命令
@@ -374,6 +372,6 @@ npx vitest run plugins/myrix-principals plugins/myrix-policy-enforcer plugins/my
 实测（2026-09-30，Node v24.13.0）：
 - 三个插件各自 `tsc` 无错误；根 `pnpm typecheck` 中本批插件 0 错误。
 - driver：8 个测试文件、**204 项测试**全部通过（原 168 项 + 本批 36 项负例）。
-- 全仓 `pnpm test`：由 Lead 统一跑。
+- 全仓 `pnpm test`：本轮结果见[验收指南](<../testing/acceptance.md>)。
 
-**注意**：上表的 `npx tsc -p plugins/<name>/tsconfig.json` 依赖 DSH 类型可解析。当前根 workspace exclude `vendor`，我在 `node_modules/.dsh-types/` 放了一份临时精确版本安装（gitignored）。纯 `pnpm install` 后需由 Lead 决定正式引入方式（推荐：`@deepseek-ai/*` 精确版本进根 `package.json`）。
+**注意**：局部检查依赖各 workspace 已安装的 DSH 类型；根门禁使用 `pnpm typecheck`。不要恢复早期临时类型目录或改变 vendor/workspace 边界。上表历史执行数字不代表本次运行结果；本轮证据见[验收指南](<../testing/acceptance.md>)。

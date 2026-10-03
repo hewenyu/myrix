@@ -32,7 +32,7 @@
 #     绝不覆盖已有历史。脚本**不创建、不删除、不清空**任何库或卷，也不做 down -v。
 #
 # 配置归档**不在此脚本内自动解包**：它含签名私钥（等同会话伪造能力），必须按
-# deploy/vps/backup-restore.md 手工、安全地恢复同套私有配置。
+# docs/deployment/backup-restore.md 手工、安全地恢复同套私有配置。
 #
 # 前置条件：postgres 必须已运行；业务库与 Keycloak 库必须已经由 provision
 # 建成**空库/角色**（本脚本不建库、不建角色）。恢复期间不要启动应用，顺序见文档。
@@ -237,7 +237,7 @@ echo "restore: Cell 卷 $VOLUME 已从同一备份集解包"
 # 所以这里只列后续的 migrate/auth/grants/up 与人工核对项。
 echo "restore: 数据库与 Cell 卷已恢复；**配置归档未自动解包**（它含签名私钥与令牌）。"
 echo "restore: 不要重跑本脚本，也不要再跑 provision/建库：库与卷现在都非空，会被拒绝。"
-echo "restore: 接下来只剩这些（按序，见 deploy/vps/backup-restore.md 第 4 节）："
+echo "restore: 接下来只剩这些（按序，见 docs/deployment/backup-restore.md 第 4 节）："
 echo "restore:   1) docker compose ... run --rm migrate   # 幂等；已存在的表/记录会跳过"
 echo "restore:   2) docker compose ... run --rm auth      # 建/补齐 myrix_auth schema"
 echo "restore:   3) docker compose ... run --rm grants    # 幂等收口 + Cell 凭据/身份登记"

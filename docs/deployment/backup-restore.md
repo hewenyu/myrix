@@ -249,7 +249,7 @@ docker compose -f compose.yml -f ../auth/compose.auth.yml exec postgres \
 
 ### 6.1 实测范围与剩余边界（不要扩大验收结论）
 
-2026-10-01，Lead 另行运行了**真实、一次性、隔离的 PostgreSQL 17.11 容器夹具**，
+历史记录（2026-10-01，非本轮复跑）：维护者另行运行了**真实、一次性、隔离的 PostgreSQL 17.11 容器夹具**，
 使用部署所固定的官方镜像摘要；不连接本地开发库或 VPS，不构建 Myrix 镜像。
 执行仓库真实的 provision SQL、12 个业务迁移、网关迁移、认证迁移与低权限 grants/身份登记，然后备份并恢复到两个新建空库：
 
@@ -261,11 +261,11 @@ docker compose -f compose.yml -f ../auth/compose.auth.yml exec postgres \
 - 第二库用 `keycloak` owner 的一张标记表验证独立库恢复，**不是完整 Keycloak realm/用户恢复**。
 - 真实 Docker bind mount 上验证了容器 root 生成的 dump 在 `chmod 600`、
   `chown "$(stat -c '%u:%g' /out)"` 后由宿主用户拥有且可读。
-- 本地忽略目录中的[结构化报告](<../../data/validation/pg-recovery-lN3PMV/report.json>)记录此次结果；不随源码分发。
+- 原始结构化报告仅本地保存，不作为公开可复现依赖；公开验证要求见[分层验收指南](<../testing/acceptance.md>)。
 
 上述夹具不替代完整脚本/现场演练：
 
-- 两个脚本的完整编排仍只有 **34 条 mock/命令契约回归**；尚未实测整套
+- 两个脚本的完整编排仍只有 **mock/命令契约回归证据**；尚未实测整套
   `backup.sh → restore.sh`、真实 Cell 卷归档，以及完整 Keycloak realm 的联合恢复。
 - 未实测缺失原始角色的恢复失败情形；必须保留全部角色前置条件及 `--exit-on-error`。
 - 尚未在目标 Ubuntu VPS 上确认数字属主与 bind mount 行为；不能由本地 Docker 结果

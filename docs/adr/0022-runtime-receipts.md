@@ -1,6 +1,6 @@
 # ADR-0022：查回执用全新短凭证，Cell 严格一租户，对外错误只给固定安全原因
 
-- 状态：已接受（BFF 侧已实现；driver 侧对 receipt 绑定的签名消费、同六字段活性与回执记录 `sid` 核对由 Lead 补齐验收）
+- 状态：已接受（BFF 与 driver 均已实现；2026-10-02 核对当前回执门禁测试，见文末）
 - 日期：2026-10-01
 - 相关：[ADR-0010](./0010-grant-es256.md)（ES256 凭证）、[ADR-0012](./0012-platform-authorization.md)（平台授权）、[ADR-0013](./0013-bff-authentication.md)、[ADR-0016](./0016-runtime-driver.md)（runtime driver）、[ADR-0019](./0019-cell-binding-leases.md)
 - 实现：`apps/bff/src/runtime-{cells,router,driver-client,stream,config}.ts`、`apps/bff/tests/runtime-*.test.ts`
@@ -42,7 +42,7 @@ BFF 运行时（`apps/bff/src/runtime-*.ts`）首版实现后的评审发现四�
 
 即：不用被消费过的 POST `jti`，也不用绑定投递正文的 `bh`。因此 driver 侧可以对 receipt 路径做**真实的** `verifyAndConsume(token, {op:'subscribe', cmd:'receipt-<id>', bh:sha256('')})`。
 
-BFF 侧测试用一个**真实验签**的假 driver GET 强制这一点：语法 Bearer、复用 POST grant、错误的 cmd / op / bh / aud / tid / boot 全部被拒；POST 的 jti 被消费后，GET 仍能独立验签通过。driver 侧的负例（unknown receipt / replay / `sid` 不符）由 Lead 在其范围内补齐。
+BFF 侧测试用一个**真实验签**的假 driver GET 强制这一点：语法 Bearer、复用 POST grant、错误的 cmd / op / bh / aud / tid / boot 全部被拒；POST 的 jti 被消费后，GET 仍能独立验签通过。driver 侧相应负例已由[回执门禁测试](<../../plugins/myrix-runtime-driver/tests/controller.test.ts>)覆盖。
 
 ### 3. 事件白名单按字段读；`end` 只映射 `abandoned`
 
@@ -82,4 +82,4 @@ BFF 侧自动化验证（`apps/bff/tests/runtime-stream.test.ts`、`apps/bff/tes
 - 投影：`start`→`stream-start`、`abandoned`→`stream-abandoned`、`committed` 不投影；reasoning / 工具 arguments / `tool/result` / prompt / 工具 schema / 内部错误原文都不出现在公开事件里。
 - 客户端：响应体超限与声明超限都 cancel 上游；连接异常与 driver `reason` 原文不外泄；404 保留 `undefined`。
 
-未覆盖 / 由他人补齐：driver 侧的 receipt 绑定签名消费与同六字段活性核对、回执记录 `sid` 核对、unknown receipt / replay / 不同 `sid` 的负例（Lead 范围）；Cell 管理器写 CRD 后的动态目录仍复用同一接口，未实现。
+2026-10-02 核对：driver 侧 receipt 签名消费、六字段活性和回执 `sid` 核对及负例已落在[控制器实现](<../../plugins/myrix-runtime-driver/src/controller.ts>)与[测试](<../../plugins/myrix-runtime-driver/tests/controller.test.ts>)，本轮控制器测试65项通过，HTTP路由测试42项通过。Cell 管理器写 CRD 后的动态目录仍未接入当前主线。上述 BFF PG 用例的执行与跳过范围以[验收指南](<../testing/acceptance.md>)为准。

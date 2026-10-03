@@ -56,8 +56,8 @@ const BASE_INPUT = Object.freeze({
   domain: "myrix.example.com",
   origin: "https://myrix.example.com",
   ...IMAGES,
-  upstreamUrl: "https://api.apikey.fan/v1/responses",
-  upstreamModel: "deepseek-flash",
+  upstreamUrl: "https://api.example.com/v1/responses",
+  upstreamModel: "example-responses-model",
   upstreamApiKey: "sk-upstream-value",
 });
 
